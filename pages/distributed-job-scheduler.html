@@ -1,14 +1,6 @@
-<!DOCTYPE html>
-<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<script async src="https://www.googletagmanager.com/gtm.js?id=GTM-N4NC3S3Q"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-</script>
 <title>Building a distributed job scheduler</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -50,7 +42,8 @@ button{font:inherit;color:inherit;cursor:pointer}
 
 /* top bar */
 .bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;height:var(--bar);display:flex;align-items:center;gap:14px;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--line);font-family:var(--head)}
-.bar .title{font-weight:600;font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.bar .title{font-weight:600;font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;text-decoration:none}
+.bar .title:hover{text-decoration:underline}
 .menu{display:none;border:1px solid var(--line);background:none;border-radius:8px;padding:6px 10px;font-size:.9rem}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;padding:3px;background:var(--sunken);gap:2px}
 .seg button{border:0;background:none;border-radius:7px;padding:5px 11px;font-size:.88rem;font-weight:500;color:var(--muted);display:flex;gap:6px;align-items:center}
@@ -254,7 +247,7 @@ pre .tc{color:var(--muted);font-style:italic}
 
 <header class="bar">
   <button class="menu" id="menu" aria-expanded="false" aria-controls="side">Contents</button>
-  <div class="title">Distributed job scheduler</div>
+  <a class="title" href="#main" aria-label="Back to top: Distributed job scheduler">Distributed job scheduler</a>
   <div class="seg" id="gseg" role="group" aria-label="Depth for the whole guide">
     <button data-d="1"><b>1</b><span>Overview</span></button>
     <button data-d="2"><b>2</b><span>Mechanics</span></button>
@@ -1295,6 +1288,4 @@ addEventListener('hashchange',route);
 route();
 })();
 </script>
-<!-- Cloudflare Web Analytics --><script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "42ea943f44b14746994f7cfa917cc3ab"}'></script><!-- End Cloudflare Web Analytics -->
 </body>
-</html>
