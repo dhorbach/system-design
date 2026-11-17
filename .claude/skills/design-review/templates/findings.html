@@ -1,0 +1,301 @@
+<title>Design review</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=Source+Serif+4:ital,opsz,wght@1,8..60,400&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+/* Layout: one reading column; summary and filters on top, one card per finding below. */
+:root{
+  --bg:#F3F5F8; --surface:#FFFFFF; --sunken:#E9EDF3; --ink:#18202E; --muted:#5B6577; --line:#D9DFE8; --accent:#2D5BD7;
+  --high:#C2362F; --medium:#A86200; --low:#4F6B8A;
+  --approved:#1E7F4F; --rejected:#6F7889; --change:#7A45C9;
+  --head:"Space Grotesk",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+  --body:"Inter",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+  --quote:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0F141C; --surface:#171E29; --sunken:#111821; --ink:#E5EAF2; --muted:#98A3B5; --line:#2A3443; --accent:#86A6FF;
+    --high:#FF7F75; --medium:#F2B04A; --low:#9DB8DA;
+    --approved:#52CF90; --rejected:#9AA4B4; --change:#BC98F7;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0F141C; --surface:#171E29; --sunken:#111821; --ink:#E5EAF2; --muted:#98A3B5; --line:#2A3443; --accent:#86A6FF;
+  --high:#FF7F75; --medium:#F2B04A; --low:#9DB8DA;
+  --approved:#52CF90; --rejected:#9AA4B4; --change:#BC98F7;
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:400 15px/1.55 var(--body);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:52rem;margin:0 auto;padding-block:36px 80px;display:grid;gap:22px}
+a{color:var(--accent);text-underline-offset:3px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+button,textarea,select{font:inherit;color:inherit}
+
+.top{display:grid;gap:6px}
+.eyebrow{font:500 .78rem var(--head);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+h1{font:700 clamp(1.7rem,4vw,2.3rem)/1.1 var(--head);letter-spacing:-.015em;margin:0;text-wrap:balance}
+.src{color:var(--muted);font-size:.9rem;display:flex;flex-wrap:wrap;gap:4px 14px}
+.src code{font:500 .82rem var(--mono);background:var(--sunken);padding:1px 6px;border-radius:4px;overflow-wrap:anywhere}
+
+.summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) minmax(0,2fr);gap:10px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:grid;gap:2px;align-content:start}
+.card code,.note code{font:500 .84em var(--mono);background:var(--sunken);padding:.05em .35em;border-radius:4px;overflow-wrap:anywhere}
+.tile b{font:600 1.6rem/1.1 var(--head);font-variant-numeric:tabular-nums}
+.tile span{font-size:.82rem;color:var(--muted)}
+.tile.high b{color:var(--high)} .tile.medium b{color:var(--medium)} .tile.low b{color:var(--low)}
+.progress{display:grid;gap:8px;align-content:start}
+.bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--sunken)}
+.bar i{display:block;height:100%}
+.bar .approved{background:var(--approved)} .bar .change{background:var(--change)} .bar .rejected{background:var(--rejected)} .bar .applied{background:var(--approved);opacity:.55}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:.8rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.status{font-size:.86rem;color:var(--muted);margin:0}
+.status.warn{color:var(--medium)}
+
+.filters{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;font-size:.86rem}
+.group{display:flex;flex-wrap:wrap;gap:4px}
+.chip{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:3px 11px;cursor:pointer;color:var(--muted);font-variant-numeric:tabular-nums}
+.chip:hover{color:var(--ink);border-color:var(--muted)}
+.chip[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.filters select{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:3px 8px}
+
+.list{display:grid;gap:14px}
+.empty{color:var(--muted);text-align:center;padding:30px 0;margin:0}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:grid;gap:10px;min-width:0;scroll-margin-top:16px}
+.card.applied{opacity:.72}
+.head{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-size:.8rem}
+.fid{font:500 .8rem var(--mono);color:var(--muted)}
+.pill{font:600 .72rem var(--head);letter-spacing:.04em;text-transform:uppercase;border-radius:5px;padding:2px 7px;border:1px solid currentColor}
+.pill.high{color:var(--high)} .pill.medium{color:var(--medium)} .pill.low{color:var(--low)}
+.tag{color:var(--muted);background:var(--sunken);border-radius:5px;padding:2px 7px}
+.sec{color:var(--muted)}
+.dstate{margin-left:auto;font-weight:600}
+.dstate.approved,.dstate.applied{color:var(--approved)} .dstate.change{color:var(--change)} .dstate.rejected{color:var(--rejected)} .dstate.undecided{color:var(--muted);font-weight:500}
+.card h2{font:600 1.08rem/1.35 var(--head);margin:0;text-wrap:balance}
+blockquote{margin:0;padding:8px 12px;border-radius:8px;background:var(--sunken);font:italic 400 1rem/1.5 var(--quote);overflow-wrap:anywhere}
+dl{margin:0;display:grid;grid-template-columns:7.5rem minmax(0,1fr);gap:6px 12px}
+dt{font:500 .8rem/1.9 var(--head);color:var(--muted)}
+dd{margin:0}
+.decide{display:grid;gap:8px;border-top:1px solid var(--line);padding-top:10px}
+.btns{display:flex;flex-wrap:wrap;gap:6px}
+.btns button{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:5px 12px;cursor:pointer;font-weight:500}
+.btns button:hover:not(:disabled){border-color:var(--ink)}
+.btns button:disabled{opacity:.45;cursor:default}
+.btns button[aria-pressed="true"].approve{background:var(--approved);border-color:var(--approved);color:var(--surface)}
+.btns button[aria-pressed="true"].change{background:var(--change);border-color:var(--change);color:var(--surface)}
+.btns button[aria-pressed="true"].reject{background:var(--rejected);border-color:var(--rejected);color:var(--surface)}
+.btns .undo{border:0;background:none;color:var(--muted);text-decoration:underline;text-underline-offset:3px;padding-inline:4px}
+textarea{width:100%;min-height:4.5em;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:8px 10px;resize:vertical}
+.note{white-space:pre-wrap;font-size:.92rem;border-left:2px solid var(--change);padding-left:10px}
+.meta{font-size:.8rem;color:var(--muted)}
+.meta.err{color:var(--high)}
+.foot{font-size:.82rem;color:var(--muted)}
+
+@media (max-width:640px){
+  .summary{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .progress{grid-column:1 / -1}
+  dl{grid-template-columns:1fr}
+  dt{line-height:1.3}
+  .dstate{margin-left:0;flex-basis:100%}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow" id="eyebrow">Design review</div>
+    <h1 id="dtitle">Design review</h1>
+    <div class="src" id="src"></div>
+  </header>
+
+  <section class="summary" aria-label="Summary">
+    <div class="tile high"><b id="n-high">0</b><span>High</span></div>
+    <div class="tile medium"><b id="n-medium">0</b><span>Medium</span></div>
+    <div class="tile low"><b id="n-low">0</b><span>Low</span></div>
+    <div class="tile progress">
+      <div class="bar" id="bar" aria-hidden="true"></div>
+      <div class="legend" id="legend"></div>
+      <p class="status" id="status">Loading decisions…</p>
+    </div>
+  </section>
+
+  <nav class="filters" aria-label="Filter findings">
+    <div class="group" id="f-sev" role="group" aria-label="Severity"></div>
+    <div class="group" id="f-dec" role="group" aria-label="Decision"></div>
+    <label>Pass <select id="f-pass"><option value="all">All passes</option></select></label>
+  </nav>
+
+  <main class="list" id="list"></main>
+  <p class="empty" id="empty" hidden>No findings match these filters.</p>
+  <p class="foot">Approve, reject or ask for a change on each finding. Comments on a finding are read when the fixes are applied.</p>
+</div>
+
+<script type="application/json" id="review-data">
+{"design":{"title":"Example design","source":"pages/example.html","url":"","reviewed":"2026-11-17","passes":["framing","terminology","requirements","data-model","assumptions","arithmetic","correctness","claims","simplicity"]},
+ "findings":[
+  {"id":"F-01","pass":"requirements","severity":"medium","section":"Requirements","anchor":"requirements","title":"Example: a requirement names its mechanism","quote":"Writes are fenced on epoch and attempt, and every run carries an idempotency key","why":"Example finding. A requirement should state the guarantee, not the technique that delivers it.","fix":"State the guarantee and link to the section that implements it."},
+  {"id":"F-02","pass":"framing","severity":"low","section":"Problem","anchor":"overview","title":"Example: filler sentence in the Problem section","quote":"The features fit in one sentence.","why":"Example finding. The sentence announces structure without adding information.","fix":"Remove the sentence."}
+ ]}
+</script>
+
+<script>
+(function(){
+const $=s=>document.querySelector(s);
+const DATA=JSON.parse($('#review-data').textContent);
+const F=DATA.findings||[], D=DATA.design||{};
+const SEV=['high','medium','low'];
+const DEC={undecided:'Undecided',approved:'Approved',change:'Needs change',rejected:'Rejected',applied:'Applied'};
+const filt={sev:'all',dec:'all',pass:'all'};
+let decisions={}, db=null, user=null, me=null, canWrite=true, dbState='connecting';
+const pending={}, cards={};
+
+function decOf(id){const d=decisions[id]; if(!d) return 'undecided'; return d.applied?'applied':(DEC[d.status]?d.status:'undecided');}
+function el(tag,cls,text){const e=document.createElement(tag); if(cls) e.className=cls; if(text!=null) e.textContent=text; return e;}
+/* `code` spans in finding text become <code>; everything else stays plain text */
+function rich(tag,cls,text){const e=el(tag,cls); String(text||'').split('`').forEach((part,i)=>{ if(part) e.appendChild(i%2?el('code',null,part):document.createTextNode(part)); }); return e;}
+
+/* header */
+document.title=(D.title?D.title+' review':'Design review');
+$('#dtitle').textContent=D.title||'Design review';
+$('#eyebrow').textContent='Design review'+(D.reviewed?' · '+D.reviewed:'');
+if(D.source){const s=el('span'); s.append('Source '); s.appendChild(el('code',null,D.source)); $('#src').appendChild(s);}
+if(D.url){const a=el('a',null,'Open the page'); a.href=D.url; a.target='_blank'; a.rel='noopener'; $('#src').appendChild(a);}
+$('#src').appendChild(el('span',null,F.length+(F.length===1?' finding':' findings')));
+SEV.forEach(s=>{$('#n-'+s).textContent=F.filter(f=>f.severity===s).length;});
+
+/* filters */
+function chips(box,key,opts){
+  box.innerHTML='';
+  opts.forEach(([v,label,n])=>{const b=el('button','chip',label+(n!=null?' '+n:'')); b.type='button'; b.setAttribute('aria-pressed',String(filt[key]===v));
+    b.addEventListener('click',()=>{filt[key]=v; renderAll();}); box.appendChild(b);});
+}
+const passes=[...new Set(F.map(f=>f.pass))];
+passes.forEach(p=>{const o=el('option',null,p); o.value=p; $('#f-pass').appendChild(o);});
+$('#f-pass').addEventListener('change',e=>{filt.pass=e.target.value; renderAll();});
+
+/* cards */
+F.forEach(f=>{
+  const c=el('article','card'); c.id=f.id; c.setAttribute('aria-labelledby',f.id+'-t');
+  const h=el('div','head');
+  h.appendChild(el('span','fid',f.id));
+  h.appendChild(el('span','pill '+f.severity,f.severity));
+  h.appendChild(el('span','tag',f.pass));
+  if(f.section){ if(D.url&&f.anchor){const a=el('a','sec',f.section); a.href=D.url+'#'+f.anchor; a.target='_blank'; a.rel='noopener'; h.appendChild(a);} else h.appendChild(el('span','sec',f.section)); }
+  const ds=el('span','dstate'); h.appendChild(ds);
+  const t=rich('h2',null,f.title); t.id=f.id+'-t';
+  const q=el('blockquote',null,f.quote);
+  const dl=el('dl'); dl.append(el('dt',null,'Why'),rich('dd',null,f.why),el('dt',null,'Suggested fix'),rich('dd',null,f.fix));
+  const dz=el('div','decide');
+  const btns=el('div','btns');
+  const bA=el('button','approve','Approve'), bC=el('button','change','Needs change'), bR=el('button','reject','Reject'), bU=el('button','undo','Clear decision');
+  [bA,bC,bR,bU].forEach(b=>b.type='button');
+  btns.append(bA,bC,bR,bU);
+  const ta=el('textarea'); ta.id='note-'+f.id; ta.placeholder='What should change? This note is applied with the fix.'; ta.hidden=true; ta.setAttribute('aria-label','Change note for '+f.id);
+  const save=el('button','change','Save note'); save.type='button'; save.hidden=true;
+  const sv=el('div','btns'); sv.appendChild(save);
+  const note=el('div','note'); note.hidden=true;
+  const meta=el('div','meta'); meta.hidden=true;
+  const err=el('div','meta err'); err.hidden=true; err.setAttribute('role','status');
+  dz.append(btns,note,ta,sv,meta,err);
+  c.append(h,t,q,dl,dz);
+  $('#list').appendChild(c);
+  bA.addEventListener('click',()=>decide(f.id,'approved',''));
+  bR.addEventListener('click',()=>decide(f.id,'rejected',''));
+  bC.addEventListener('click',()=>{ ta.hidden=false; save.hidden=false; const d=decisions[f.id]; if(d&&d.status==='change'&&!ta.value) ta.value=d.note||''; ta.focus(); });
+  save.addEventListener('click',()=>{ const v=ta.value.trim(); if(!v){showErr(f.id,'Add a note saying what should change.'); ta.focus(); return;} decide(f.id,'change',v); });
+  bU.addEventListener('click',()=>clearDecision(f.id));
+  cards[f.id]={c,ds,bA,bC,bR,bU,ta,save,note,meta,err};
+});
+
+function showErr(id,msg){const k=cards[id]; k.err.textContent=msg; k.err.hidden=!msg;}
+
+async function decide(id,status,note){
+  if(!db||!canWrite||pending[id]) return;
+  pending[id]=true; showErr(id,''); updateCard(id);
+  try{
+    await db.doc('decisions/'+id).set({status,note,by:me||null,at:new Date().toISOString()});
+    const k=cards[id]; k.ta.hidden=true; k.save.hidden=true;
+  }catch(e){ failed(id,e); }
+  pending[id]=false; updateCard(id);
+}
+async function clearDecision(id){
+  if(!db||!canWrite||pending[id]) return;
+  pending[id]=true; showErr(id,''); updateCard(id);
+  try{ await db.doc('decisions/'+id).delete(); }catch(e){ failed(id,e); }
+  pending[id]=false; updateCard(id);
+}
+function failed(id,e){
+  const c=e&&e.code;
+  if(c==='invalid_argument'||c==='not_granted'||c==='revoked'){ canWrite=false; renderAll(); showErr(id,'You can read this review, but your access does not allow recording decisions.'); }
+  else if(c==='quota_exceeded') showErr(id,'The review is out of storage, so this decision was not saved.');
+  else showErr(id,'This decision was not saved. Check your connection and try again.');
+}
+
+async function updateCard(id){
+  const k=cards[id], st=decOf(id), d=decisions[id];
+  k.c.classList.toggle('applied',st==='applied');
+  k.ds.className='dstate '+st; k.ds.textContent=DEC[st];
+  const live=!!db&&canWrite&&!pending[id];
+  [k.bA,k.bC,k.bR,k.save].forEach(b=>b.disabled=!live);
+  k.bU.hidden=!d; k.bU.disabled=!live;
+  k.bA.setAttribute('aria-pressed',String(!!d&&d.status==='approved'));
+  k.bC.setAttribute('aria-pressed',String(!!d&&d.status==='change'));
+  k.bR.setAttribute('aria-pressed',String(!!d&&d.status==='rejected'));
+  k.note.hidden=!(d&&d.status==='change'&&d.note); if(d&&d.note) k.note.textContent=d.note;
+  if(!d){ k.meta.hidden=true; return; }
+  let who='';
+  if(d.by&&user){ try{ const ps=await user.profiles([d.by]); who=(ps[d.by]&&ps[d.by].isMe)?'you':((ps[d.by]&&ps[d.by].name)||''); }catch(e){} }
+  const when=d.at?new Date(d.at).toLocaleString([], {dateStyle:'medium',timeStyle:'short'}):'';
+  let line=DEC[d.status]||'Decided'; if(who) line+=' by '+who; if(when) line+=' · '+when;
+  if(d.applied){ line+='. Applied'+(d.applied_at?' '+new Date(d.applied_at).toLocaleDateString([], {dateStyle:'medium'}):'')+(d.applied_note?': '+d.applied_note:'.');
+    if(d.recheck==='still failing') line+=' Re-check: the issue is still there.'; else if(d.recheck==='fixed') line+=' Re-check: fixed.'; }
+  k.meta.textContent=line; k.meta.hidden=false;
+}
+
+function renderAll(){
+  const n={undecided:0,approved:0,change:0,rejected:0,applied:0};
+  F.forEach(f=>n[decOf(f.id)]++);
+  chips($('#f-sev'),'sev',[['all','All',F.length]].concat(SEV.map(s=>[s,s[0].toUpperCase()+s.slice(1),F.filter(f=>f.severity===s).length])));
+  chips($('#f-dec'),'dec',[['all','Any decision',null]].concat(Object.keys(DEC).map(k=>[k,DEC[k],n[k]])));
+  const bar=$('#bar'); bar.innerHTML='';
+  ['applied','approved','change','rejected'].forEach(k=>{ if(n[k]){ const i=el('i',k); i.style.width=(n[k]/F.length*100)+'%'; bar.appendChild(i);} });
+  const done=F.length-n.undecided;
+  $('#legend').textContent=done+' of '+F.length+' decided · '+n.approved+' approved · '+n.change+' needs change · '+n.rejected+' rejected · '+n.applied+' applied';
+  let shown=0;
+  F.forEach(f=>{ const ok=(filt.sev==='all'||f.severity===filt.sev)&&(filt.dec==='all'||decOf(f.id)===filt.dec)&&(filt.pass==='all'||f.pass===filt.pass);
+    cards[f.id].c.hidden=!ok; if(ok) shown++; updateCard(f.id); });
+  $('#empty').hidden=shown>0;
+  renderStatus();
+}
+function renderStatus(){
+  const s=$('#status'); s.classList.remove('warn');
+  const msg={
+    connecting:'Loading decisions…',
+    live:canWrite?'Decisions are saved for everyone who can open this review.':'You can read this review. People with edit access record the decisions.',
+    slow:'Decisions can’t be reached yet, so what you see may be out of date.',
+    absent:'Decisions can’t be recorded here. Open the review on claude.ai to approve or reject findings.',
+    error:'Decisions stopped updating. Reload the page to reconnect.'
+  }[dbState];
+  if(dbState==='slow'||dbState==='error') s.classList.add('warn');
+  s.textContent=msg;
+}
+
+renderAll();
+
+(async function(){
+  if(!(window.claude&&window.claude.use)){ dbState='absent'; renderAll(); return; }
+  [db,user]=await Promise.all([window.claude.use('db'),window.claude.use('user')]);
+  if(!db){ dbState='absent'; renderAll(); return; }
+  if(user){ me=await user.id(); const w=await user.can('data.write'); if(w===false) canWrite=false; }
+  const timer=setTimeout(()=>{ if(dbState==='connecting'){ dbState='slow'; renderStatus(); } },10000);
+  db.collection('decisions').onSnapshot(snap=>{
+    const next={}; snap.docs.forEach(d=>{ if(d.exists) next[d.id]=d.data(); }); decisions=next;
+    if(!snap.metadata.fromCache){ clearTimeout(timer); dbState='live'; } else if(dbState==='connecting'){ dbState='live'; }
+    renderAll();
+  },e=>{ clearTimeout(timer); dbState=(e&&e.code==='revoked')?'absent':'error'; renderAll(); });
+})();
+})();
+</script>
