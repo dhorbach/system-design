@@ -458,7 +458,7 @@ pre .tc{color:var(--muted);font-style:italic}
     <ul>
       <li><strong>Create</strong> inserts the job row and its first pending run in one transaction, then answers. The job is durable from the moment that commit succeeds.</li>
       <li><strong>Edit</strong> changes the definition only. Runs already created keep the request and policies they copied, so an edit applies from the next run onward.</li>
-      <li><strong>Cancel</strong> marks the job and its pending runs cancelled. A run already loaded by a scheduler is not hunted down; it fails its conditional update when it fires.</li>
+      <li><strong>Cancel</strong> stops the job from creating new runs and deletes its pending ones. A run already loaded by a scheduler is not hunted down; its conditional update finds no pending row when it fires.</li>
       <li><strong>Retry</strong> resets the same dead run to pending. It keeps its run id, so the receiver sees the same idempotency key.</li>
     </ul>
   </div>
@@ -483,8 +483,8 @@ pre .tc{color:var(--muted);font-style:italic}
     <p>It holds two kinds of record, because they behave differently.</p>
     <div class="scroll"><table>
       <tr><th>Record</th><th>What it is</th><th>How often it changes</th></tr>
-      <tr><td>Job definition (task)</td><td>Schedule, payload or HTTP request, retry policy, priority, owner</td><td>Rarely, when someone edits it</td></tr>
-      <tr><td>Run (job execution)</td><td>One execution: <code>run_id</code>, <code>job_id</code>, <code>scheduled_at</code>, <code>state</code>, <code>attempt</code>, partition</td><td>Constantly: created, claimed, retried, finished</td></tr>
+      <tr><td>Job definition</td><td>Schedule, payload or HTTP request, retry policy, priority, owner</td><td>Rarely, when someone edits it</td></tr>
+      <tr><td>Run</td><td>One execution: <code>run_id</code>, <code>job_id</code>, <code>scheduled_at</code>, <code>state</code>, <code>attempt</code>, partition</td><td>Constantly: created, claimed, retried, finished</td></tr>
     </table></div>
   </div>
   <p>A run moves through states: <code>pending</code> → <code>dispatched</code> → <code>running</code> → <code>succeeded</code>, or back to <code>pending</code> for a retry, or to <code>dead</code> when retries run out.</p>
@@ -543,8 +543,8 @@ pre .tc{color:var(--muted);font-style:italic}
     <ul>
       <li><code>scheduled_at</code> is the intended time and never changes. <code>next_run_at</code> is when to try next, so it moves forward on every retry.</li>
       <li>r_5001 is the 09:00 Madrid job: 08:00 UTC in winter. It succeeded on the first attempt.</li>
-      <li>r_5002 failed once at 14:30:00, waited a 2-second backoff, and is on attempt 2 with worker-4. Its <code>lease_expires_at</code> is 14:31:02; with no result by then, the reaper returns it to <code>pending</code>.</li>
-      <li>r_4990 used all 3 of its job’s <code>max_attempts</code> (at :00, :02 and :06) and is now in the DLQ.</li>
+      <li>r_5002 failed once at 14:30:00, waited its backoff (2 s here), and is on attempt 2 with worker-4. Its <code>lease_expires_at</code> is 14:31:02; with no result by then, the reaper returns it to <code>pending</code>.</li>
+      <li>r_4990 used all 3 of its job’s <code>max_attempts</code> (at :00, :02 and :06; the delays are shown without jitter to keep the example readable) and is now in the DLQ.</li>
       <li>All runs of j_91bc share partition 203, because the partition is a hash of <code>job_id</code>.</li>
     </ul>
     <p><strong><code>leases</code>: one row per partition.</strong></p>
@@ -555,10 +555,10 @@ pre .tc{color:var(--muted);font-style:italic}
       <tr><td>203</td><td>sched-b</td><td>7</td><td>14:32:11</td></tr>
     </table></div>
     <p>Partition 203 has changed hands seven times. Only a write carrying epoch 7 can dispatch its runs.</p>
-    <p><strong><code>outbox</code>: one row per event waiting to be published.</strong> The relay deletes a row once the queue acknowledges it.</p>
+    <p><strong><code>outbox</code>: one row per event waiting to be published.</strong> The relay deletes a row once the queue acknowledges it. The row shown was published a moment ago and is about to be deleted.</p>
     <div class="scroll"><table>
       <tr><th>event_id</th><th>run_id</th><th>payload</th><th>created_at</th></tr>
-      <tr><td>88121</td><td>r_5002</td><td><code>{"run_id":"r_5002","attempt":2}</code></td><td>14:30:02</td></tr>
+      <tr><td>88121</td><td>r_5002</td><td><code>{"run_id":"r_5002"}</code></td><td>14:30:02</td></tr>
     </table></div>
     <p><strong>Indexes on <code>runs</code>, one per reader.</strong></p>
     <div class="scroll"><table>
@@ -919,7 +919,7 @@ WHERE run_id = ? AND state = 'running'
 <section id="simple-design" class="k-store" data-toc="Design at lower scale" data-group="Wrap-up" data-nodes="store work"
   data-more2="how SKIP LOCKED works, the claim transaction and what this design costs">
   <div class="sh"><h2>Design at lower scale: let the database coordinate</h2></div>
-  <p class="lede">Below a few thousand dispatches per second, you can drop partitions, leases, the coordination service and even the message broker. The database’s row locks do all the coordination.</p>
+  <p class="lede">Below a few thousand dispatches per second, you can drop partitions, partition leases and even the message broker. The database’s row locks do all the coordination.</p>
   <div data-l="2">
     <div class="brief"><b>Brief: <code>FOR UPDATE SKIP LOCKED</code>.</b> <code>FOR UPDATE</code> locks the rows a query returns until the transaction ends. <code>SKIP LOCKED</code> makes the query pass over rows another transaction already holds instead of waiting for them. Several workers running the same query at the same moment therefore get disjoint sets of rows. Postgres and MySQL 8 both support it.</div>
     <p>Every worker runs the same short transaction:</p>
@@ -1183,7 +1183,7 @@ addEventListener('resize',spy);
     ['api','A one-off job sends','FR1'],
     ['api','inserts the job row and its first pending run','NFR1'],
     ['api','changes the definition only','FR3'],
-    ['api','marks the job and its pending runs cancelled','FR2'],
+    ['api','stops the job from creating new runs','FR2'],
     ['api','resets the same dead run to pending','FR4'],
     ['api','derives the tenant from the authenticated caller','FR5'],
     ['job-store','single source of truth: every other component','NFR1'],
@@ -1277,7 +1277,7 @@ addEventListener('resize',spy);
 /* citation address: filled in when the page is served from its own site */
 (function(){
   let own=false; try{ own=window.top===window.self; }catch(e){}
-  if(own&&/^https?:$/.test(location.protocol)&&!/(^|\.)claude\.ai$/.test(location.hostname)){
+  if(own&&/^https?:$/.test(location.protocol)){
     const u=location.origin+location.pathname, a=document.createElement('a'); a.href=u; a.textContent=u; $('#citeurl').replaceWith(a);
   }
 })();
