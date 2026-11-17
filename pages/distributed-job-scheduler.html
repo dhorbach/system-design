@@ -320,7 +320,7 @@ pre .tc{color:var(--muted);font-style:italic}
   </table></div>
   <div data-l="2">
     <h3>How they relate</h3>
-    <p>A tenant owns many jobs. A one-off job produces exactly one run; a cron job produces one run for every scheduled time. A run is executed in one or more attempts, and only the latest attempt may record its result.</p>
+    <p>A tenant owns many jobs. A one-off job produces one run; a cron job produces at most one run per scheduled time. Scheduled times missed during an outage may produce no run, as the misfire policy says, and an edit may replace a run that has not started. A run is executed in one or more attempts, and only the latest attempt may record its result.</p>
     <p>A job set for 09:00 every day produces 30 runs in a 30-day month. If the run on the 12th times out twice and succeeds on the third try, the month still has 30 runs: that one has three attempts and the other 29 have one each, 32 attempts in total.</p>
     <p>Jobs and runs are rows in the <a href="#job-store">job store</a>. An attempt is not a row of its own: it is a counter on the run, raised each time a worker claims it.</p>
   </div>
@@ -342,42 +342,38 @@ pre .tc{color:var(--muted);font-style:italic}
   <p>Each ID reappears as a tag wherever the design implements that requirement.</p>
   <h3>Functional requirements</h3>
   <ul>
-    <li><strong>One-off and recurring jobs.</strong><span data-l="2"> Run a job once at a chosen time, or repeatedly on a cron schedule evaluated in the job’s own time zone. A job can be an HTTP call or a container task, and new kinds can be added later.</span><span data-l="3"> Crashes and restarts never lose or duplicate a scheduled run; runs missed during an outage are handled as the job’s misfire policy says (<a href="#job-store">job store</a>, <a href="#load">behaviour under load</a>).</span></li>
-    <li><strong>Create, cancel and query.</strong><span data-l="2"> Clients manage jobs through an API and can see the state of every run.</span><span data-l="3"> Cancelling a job stops it from scheduling more runs. Runs already handed to workers are cancelled one by one, and a cancelled run that has not started never starts (<a href="#api">API service</a>, <a href="#dispatch">dispatch queue and workers</a>).</span></li>
+    <li><strong>One-off and recurring jobs.</strong><span data-l="2"> Run a job once at a chosen time, or repeatedly on a cron schedule evaluated in the job’s own time zone. A job’s kind can be HTTP or container, and new kinds can be added later.</span><span data-l="3"> Crashes and restarts never lose or duplicate a scheduled run; runs missed during an outage are handled as the job’s misfire policy says (<a href="#job-store">job store</a>, <a href="#load">behaviour under load</a>).</span></li>
+    <li><strong>Create, cancel and query.</strong><span data-l="2"> Clients manage jobs through an API and can see the state of every run.</span><span data-l="3"> Cancelling a job stops it from scheduling more runs. Runs already handed to workers are cancelled one by one, and a cancelled run that has not started never starts. Cancelling one run of a cron job leaves the rest of its series running (<a href="#api">API service</a>, <a href="#dispatch">dispatch queue and workers</a>).</span></li>
     <li><strong>Per-job policies.</strong><span data-l="2"> Each job carries its own priority, retry limit, timeout and misfire policy.</span><span data-l="3"> An edit applies to every run that has not started yet; a run already dispatched or running keeps the settings it started with, and an edit never makes a run fire twice (<a href="#api">API service</a>, <a href="#job-store">job store</a>).</span></li>
-    <li><strong>Retries and a dead-letter queue.</strong><span data-l="2"> Failed runs retry with backoff; runs that use up their attempts are kept for inspection and manual retry.</span><span data-l="3"> Dead runs stay available for a fixed window, for example 14 days, and the receiver sees a manual retry as the same run, not a new one (<a href="#correctness">correctness</a>).</span></li>
+    <li><strong>Retries and a dead-letter queue.</strong><span data-l="2"> Failed runs retry with backoff; runs that use up their attempts are kept for inspection and manual retry.</span><span data-l="3"> A dead run can be retried for a fixed window, for example 14 days after it died; after that, retry is refused and the row stays queryable until the 30-day retention removes it. The receiver sees a manual retry as the same run, not a new one (<a href="#correctness">correctness</a>).</span></li>
     <li><strong>Many tenants.</strong><span data-l="2"> One platform is shared by many teams or tenants.</span><span data-l="3"> Tenants are isolated: each sees and manages only its own jobs, runs and dead-letter queue, within its own rate limits (<a href="#api">API service</a>, <a href="#load">behaviour under load</a>).</span></li>
   </ul>
   <h3>Non-functional requirements</h3>
   <ul>
-    <li><strong>Accepted means it will run.</strong><span data-l="2"> Once the API says “scheduled”, the job runs even if machines crash.</span><span data-l="3"> No accepted job is lost when any single machine or component fails, and recovery needs no manual intervention (<a href="#job-store">job store</a>, <a href="#dispatch">dispatch queue and workers</a>).</span></li>
-    <li><strong>Fire on time.</strong><span data-l="2"> Scheduling lag (actual start minus intended start) stays small, usually under a second for urgent work.</span><span data-l="3"> When a scheduler node crashes, the runs it owned may start late, but by a bounded amount: typically 10–30 s (<a href="#scheduler">scheduler</a>, <a href="#timing-wheel">timing wheel</a>).</span></li>
-    <li><strong>Run at least once, and make duplicates harmless.</strong><span data-l="2"> Crashes cause retries, so the design makes repeats safe.</span><span data-l="3"> A run may execute more than once, but the receiver can always recognise a repeat, and a late result from an old attempt never overwrites a newer one (<a href="#scheduler">scheduler</a>, <a href="#correctness">correctness</a>).</span></li>
-    <li><strong>Survive peaks.</strong><span data-l="2"> People schedule on round times, so one second an hour can carry 750 times the average load.</span><span data-l="3"> A platform averaging 40 runs per second must absorb 30,000 due in one second, with high-priority runs still meeting their lag target (<a href="#estimates">capacity estimates</a>, <a href="#load">behaviour under load</a>).</span></li>
-    <li><strong>Stay fair.</strong><span data-l="2"> One tenant’s huge batch or broken endpoint must not starve everyone else.</span><span data-l="3"> Each tenant has quotas on concurrent runs and on load per destination endpoint. Defaults are sized from the capacity estimates and raised per tenant on request, the way cloud service limits are; a tenant running above the default never pushes other tenants past their lag target (<a href="#load">behaviour under load</a>).</span></li>
+    <li><strong>Accepted means it will run.</strong><span data-l="2"> Once the API says “scheduled”, its runs execute even if machines crash. The one exception is a failover of the job store’s database, which can lose writes acknowledged in roughly the last second before it.</span><span data-l="3"> No accepted job is lost when any single machine or component fails, except the job store’s primary: its replicas are updated asynchronously, so a failover can lose API writes (creates, edits, cancels, retries) acknowledged in the last second or so before it. Failover never promotes a replica further behind than that, and recovery needs no manual intervention (<a href="#store-failover">surviving a database failure</a>, <a href="#dispatch">dispatch queue and workers</a>).</span></li>
+    <li><strong>Fire on time.</strong><span data-l="2"> Scheduling lag (the time a worker starts the run minus its intended time) stays within a target per priority, even at the peak: p99 under 2 s for critical and high, under 30 s for normal, under 5 minutes for low.</span><span data-l="3"> When a scheduler node crashes, the runs it owned may start late by a bounded amount, the lease TTL plus about one claim interval and one poll (typically 15–40 s); every other node’s runs keep their target (<a href="#scheduler">scheduler</a>, <a href="#load">behaviour under load</a>).</span></li>
+    <li><strong>Run at least once, and make duplicates harmless.</strong><span data-l="2"> Crashes cause retries, so the design makes repeats safe.</span><span data-l="3"> Exactly-once execution is not achievable over a network, so the design delivers at-least-once. A run may execute more than once; every attempt carries the same run id, so the receiver can always recognise a repeat, and making a repeat harmless is the receiver’s job. A late result from an old attempt never overwrites a newer one (<a href="#scheduler">scheduler</a>, <a href="#correctness">correctness</a>).</span></li>
+    <li><strong>Survive peaks.</strong><span data-l="2"> People schedule on round times, so one second a day can carry 750 times the average load, and one second every hour about 650 times.</span><span data-l="3"> A platform averaging 40 runs per second must absorb 30,000 due in one second, with critical and high-priority runs still meeting their lag target (<a href="#estimates">capacity estimates</a>, <a href="#load">behaviour under load</a>).</span></li>
+    <li><strong>Stay fair.</strong><span data-l="2"> One tenant’s huge batch or broken endpoint must not starve everyone else.</span><span data-l="3"> One tenant’s load, however large, never pushes another tenant’s runs past their lag target, and never exceeds what its destination endpoints were told to expect (<a href="#load">behaviour under load</a>).</span></li>
   </ul>
   <div data-l="2">
     <h3>Out of scope</h3>
     <ul>
-      <li><strong>Exactly-once execution.</strong> It is not achievable over a network; the design delivers at-least-once and makes repeats safe instead.</li>    </ul>
+      <li><strong>More than one region.</strong> The design runs in one region with one job store; losing the region is a disaster-recovery event, not a failover.</li>
+      <li><strong>Dependencies between jobs.</strong> Jobs are independent; workflows (run B after A succeeds) belong to a workflow engine on top.</li>
+      <li><strong>Pausing and resuming a job.</strong> A job is active until it is cancelled.</li>
+      <li><strong>Schedules finer than a minute.</strong> Cron’s smallest step is one minute; a one-off job can still name any second.</li>
+      <li><strong>Deduplication inside the receiver.</strong> The platform sends a stable run id on every attempt; storing it and refusing repeats is the receiver’s job.</li>
+    </ul>
   </div>
 </section>
 
 <section id="estimates" data-toc="Capacity estimates" data-nodes=""
-  data-more2="the working behind each number (traffic, the peak, storage, worker concurrency) and what the numbers mean for the design"
-  data-more3="database write load, scheduler polling and the size of the in-memory buffer">
+  data-more2="the assumptions, the working behind each number (traffic, the peak, storage, worker concurrency, database writes) and what the numbers mean for the design"
+  data-more3="shards and batching for the write burst, heartbeat, lease and retry writes, scheduler polling and the size of the in-memory buffer">
   <div class="sh"><h2>Back-of-the-envelope estimates</h2></div>
   <p class="lede">Before choosing components, size the system: how many runs it executes, how unevenly they arrive, how much it stores and how many runs are executing at once. The averages turn out to be small. The worst second is 750 times the average, and that one second drives the design.</p>
-  <p>The first table lists assumptions for a mid-sized platform; the second shows what follows from them. Change the inputs and the arithmetic follows.</p>
-  <div class="scroll"><table>
-    <tr><th>Assumption</th><th>Value</th></tr>
-    <tr><td>Every-minute jobs</td><td>2,000</td></tr>
-    <tr><td>Hourly jobs</td><td>20,000</td></tr>
-    <tr><td>Daily jobs</td><td>100,000, with 8% of them set for 09:00</td></tr>
-    <tr><td>Size of one run row</td><td>About 1 KB, including the copied job spec</td></tr>
-    <tr><td>Typical run duration</td><td>2 s (most jobs are a single HTTP call)</td></tr>
-    <tr><td>How long runs stay in the hot table</td><td>30 days</td></tr>
-  </table></div>
+  <p>The table shows the results for a mid-sized platform; Mechanics adds the assumptions and the working.</p>
   <div class="scroll"><table>
     <tr><th>Estimate</th><th>Result</th></tr>
     <tr><td>Runs per day</td><td>About 3.5 million</td></tr>
@@ -388,25 +384,43 @@ pre .tc{color:var(--muted);font-style:italic}
   </table></div>
 
   <div data-l="2">
+    <h3>Assumptions</h3>
+    <div class="scroll"><table>
+      <tr><th>Assumption</th><th>Value</th></tr>
+      <tr><td>Every-minute jobs</td><td>2,000</td></tr>
+      <tr><td>Hourly jobs</td><td>20,000</td></tr>
+      <tr><td>Daily jobs</td><td>100,000: 8% set for 09:00, the rest spread evenly over the other 23 hours</td></tr>
+      <tr><td>One-off jobs created per day</td><td>50,000, spread across the day</td></tr>
+      <tr><td>Attempts that fail and retry</td><td>2%</td></tr>
+      <tr><td>Size of one run row</td><td>About 1 KB, including a copy of the job’s settings</td></tr>
+      <tr><td>Typical run duration</td><td>2 s (most jobs are a single HTTP call)</td></tr>
+      <tr><td>How long finished runs are kept</td><td>30 days</td></tr>
+    </table></div>
     <h3>Traffic</h3>
-    <div class="formula">every-minute: 2,000 × 1,440 = 2,880,000 runs/day<br>hourly: 20,000 × 24 = 480,000 runs/day<br>daily: 100,000 × 1 = 100,000 runs/day<br>total: 3,460,000 runs/day ÷ 86,400 s ≈ 40 runs/s</div>
+    <div class="formula">every-minute: 2,000 × 1,440 = 2,880,000 runs/day<br>hourly: 20,000 × 24 = 480,000 runs/day<br>daily: 100,000 × 1 = 100,000 runs/day<br>one-off: 50,000 runs/day<br>total: 3,510,000 runs/day ÷ 86,400 s ≈ 40 runs/s<br>with 2% retried: about 41 attempts/s</div>
     <p>The 2,000 every-minute jobs are under 2% of the definitions but produce over 80% of the runs.</p>
     <h3>The peak</h3>
     <p>At 09:00:00 every every-minute job, every hourly job and the 09:00 share of the daily jobs are due in the same second:</p>
     <div class="formula">2,000 + 20,000 + (8% × 100,000 = 8,000) = 30,000 runs in one second<br>30,000 ÷ 40 = 750 × the average</div>
-    <p>An ordinary top of the hour is 22,000 runs, and every top of the minute is 2,000. Between those instants the system is almost idle.</p>
+    <p>An ordinary top of the hour is about 26,000 runs: 2,000 + 20,000, plus about 4,000 of the other 92,000 daily jobs (92,000 ÷ 23 hours). Every top of the minute is 2,000. Between those instants the system is almost idle.</p>
     <h3>Storage</h3>
-    <div class="formula">3,460,000 runs/day × 1 KB ≈ 3.5 GB/day<br>3.5 GB/day × 30 days ≈ 100 GB in the hot table</div>
-    <p>Job definitions are negligible next to that: 122,000 rows. Partitioning runs by day and dropping old partitions keeps the hot table at this size; the <a href="#job-store">job store</a> section covers how at full detail.</p>
+    <div class="formula">3,510,000 runs/day × 1 KB ≈ 3.5 GB/day<br>3.5 GB/day × 30 days ≈ 100 GB in the hot table</div>
+    <p data-noterm="Partition">Job definitions are small next to that: 122,000 recurring jobs, plus 50,000 one-off jobs a day that are removed with their runs after 30 days, so about 1.6 million rows. Splitting the runs table into daily table partitions and dropping old ones keeps the hot table at this size; the <a href="#job-store">job store</a> section covers how at full detail.</p>
     <h3>Worker concurrency</h3>
     <div class="formula">average: 40 runs/s × 2 s = 80 calls in flight<br>peak: 30,000 runs × 2 s = 60,000 call-seconds of work<br>cleared in 10 s: 60,000 ÷ 10 = 6,000 calls in flight<br>cleared in 60 s: 60,000 ÷ 60 = 1,000 calls in flight</div>
     <p>The calls are outbound HTTP, so this is mostly waiting on the network. The real limit is how many concurrent calls the tenants’ endpoints can take, which is why concurrency caps per tenant and per endpoint are a requirement. Container jobs change the picture: they run for minutes rather than seconds and are limited by cluster CPU and memory rather than by endpoints, so they need their own concurrency budget.</p>
+    <p>Per-tenant defaults follow from the same numbers. A default cap of 5% of the peak capacity, 300 concurrent attempts, lets one tenant use a twentieth of the fleet in the worst second; a default of 50 concurrent calls per destination endpoint protects receivers that never planned for the burst. A tenant that needs more asks for a raise (<a href="#load">behaviour under load</a>).</p>
+    <h3>Database writes</h3>
+    <p>A clean run costs six row writes: its insert (made when the previous run of its job is dispatched), the dispatch update and its outbox row, the outbox delete, the claim and the result. Three land in the firing second; the other three follow as the relay publishes and workers drain the queue.</p>
+    <div class="formula">scheduler, in the firing second: 30,000 runs × 3 = 90,000 row writes<br>relay and workers, over 10 to 60 s: 30,000 × 3 = 90,000 row writes = 1,500 to 9,000 writes/s<br>average day: 41 attempts/s × 6 ≈ 250 writes/s</div>
+    <p>The firing second is the number to size for: 90,000 row writes in one second is far more than one database primary takes.</p>
   </div>
   <div data-l="3">
-    <h3>Database writes</h3>
-    <p>One run costs about five writes over its life: create, dispatch (with its outbox row), claim, result, and the outbox delete.</p>
-    <div class="formula">average: 40 runs/s × 5 = 200 writes/s<br>peak: 30,000 runs × 5 writes = 150,000 writes<br>spread over 10 s: 15,000 writes/s</div>
-    <p>The runs for 09:00 already exist as pending rows, but dispatching each cron run inserts its next run in the same transaction, so all five writes land in the burst. 15,000 writes per second is more than one Postgres or MySQL primary sustains comfortably. Two choices make it fit: shard the job store by partition (for example 8 shards with Citus or Vitess, under 2,000 writes per second each), and batch each scheduler’s dispatches into one transaction per partition per tick, which turns thousands of row writes into a few hundred commits. The queue does not remove any of these writes; it spreads the claims and results over the 10 to 60 seconds that workers take to drain the burst.</p>
+    <h3>Shards and batches for the firing second</h3>
+    <p>One Postgres or MySQL primary comfortably sustains roughly 5,000 to 10,000 small single-row commits per second, and several times that many rows when they are batched. Two choices make the firing second fit. Shard the job store by partition, for example 16 shards with Citus or Vitess, so each shard takes about 5,600 row writes in that second. And batch each scheduler’s dispatches into one transaction per partition per tick, which turns those rows into a few hundred commits per shard. If a shard still falls behind, dispatch drains over two or three seconds in priority order (<a href="#scheduler">scheduler</a>), so critical and high-priority runs go first and keep their lag target. The queue does not remove any of these writes; it spreads the claims and results over the 10 to 60 seconds that workers take to drain the burst.</p>
+    <h3>Writes that are not runs</h3>
+    <div class="formula">heartbeats, peak: 6,000 attempts in flight ÷ 5 s interval = 1,200 writes/s<br>heartbeats, average: 80 ÷ 5 s = 16 writes/s<br>lease renewals: 256 partitions ÷ 5 s ≈ 50 writes/s, whatever the load<br>retries: 2% of attempts repeat 5 writes: about 5 writes/s on average, 3,000 in the minute after the peak</div>
+    <p>Heartbeats are the largest of these at the peak, and container jobs, which heartbeat for minutes, dominate them; keep the interval at a few seconds, not below one.</p>
     <h3>Scheduler and memory</h3>
     <div class="formula">polling: 256 partitions × 1 query/s = 256 queries/s, whatever the job count<br>buffer, typical: 30 s lookahead × 40 runs/s = 1,200 runs in memory<br>buffer, before 09:00: 30,000 runs × about 200 bytes ≈ 6 MB</div>
     <p>At this size a min-heap or the language’s built-in timers are enough; a timing wheel pays off at much larger timer counts.</p>
@@ -414,10 +428,10 @@ pre .tc{color:var(--muted);font-style:italic}
   <div data-l="2">
     <h3>What the numbers say</h3>
     <ul>
-      <li><strong>Size for the peak, not the average.</strong> 40 runs per second fits on one modest database. 30,000 in one second is far beyond the few thousand dispatches per second that the design at lower scale handles.</li>
+      <li><strong>Size for the peak, not the average.</strong> 40 runs per second fits on one modest database. 30,000 in one second is far beyond the roughly 2,000 runs per second that one database handles even in the design at lower scale.</li>
       <li><strong>Put a buffer between deciding and doing.</strong> The scheduler can mark 30,000 runs due in a second; workers need 10 to 60 seconds to run them. The dispatch queue absorbs the difference.</li>
       <li><strong>Decide who waits.</strong> If the burst takes 10 seconds to clear, some runs are 10 seconds late. Priority and fairness decide which ones.</li>
-      <li><strong>Storage is not the hard part; the write burst is.</strong> About 100 GB of hot data needs only retention, but the 09:00 burst of writes needs batching and a sharded job store.</li>
+      <li><strong>Storage is not the hard part; the write burst is.</strong> About 100 GB of hot data needs only retention, but the 90,000 row writes of the firing second need batching and a sharded job store.</li>
     </ul>
   </div>
 </section>
@@ -437,31 +451,31 @@ pre .tc{color:var(--muted);font-style:italic}
     <a href="#dispatch" class="k-work"><rect class="box" x="193" y="170" width="140" height="56" rx="9"/><text class="t" x="263" y="193" text-anchor="middle">Workers</text><text class="s" x="263" y="211" text-anchor="middle">execute runs</text></a>
     <a href="#dispatch" class="k-queue"><rect class="box" x="387" y="170" width="140" height="56" rx="9"/><text class="t" x="457" y="193" text-anchor="middle">Dispatch queue</text><text class="s" x="457" y="211" text-anchor="middle">buffers due runs</text></a>
   </svg></div>
-  <figcaption>Select a component to jump to its section. The API writes into the job store; scheduler nodes load due runs from it and push them to the dispatch queue; workers run them and write results back to the store. Which scheduler node owns which slice of the jobs is recorded in a leases table inside the job store, so leases are data, not a separate component. Two small background processes are not drawn: the outbox relay and the reaper, both covered under dispatch queue and workers.</figcaption></figure>
+  <figcaption>Select a component to jump to its section. The API writes into the job store; scheduler nodes load due runs from it and push them to the dispatch queue; workers run them and write results back to the store.<span data-l="2"> Which scheduler node owns which slice of the jobs is recorded in a leases table inside the job store, so leases are data, not a separate component. Three small background processes are not drawn: the outbox relay, the reaper and the sweeper, covered under dispatch queue and workers.</span></figcaption></figure>
 
   <h3>The life of one run</h3>
   <ol class="life">
     <li><b>Created</b><span>A client calls the API: “call this URL every day at 09:00”. The API stores a job definition and the first run, <code>pending</code>, due tomorrow at 09:00.</span></li>
     <li><b>Loaded</b><span>About 30 seconds before 09:00, the scheduler node that owns the run’s partition finds it in its regular poll and holds it in memory.</span></li>
-    <li><b>Fired</b><span>At 09:00:00 the scheduler marks the run <code>dispatched</code> (a write only the current owner can make) and, in the same transaction, adds an outbox row that a relay publishes to the queue. For a cron job it also creates tomorrow’s run.</span></li>
+    <li><b>Fired</b><span>At 09:00:00 the scheduler marks the run <code>dispatched</code> and hands it to the queue; for a cron job it also creates the next run.<span data-l="2"> The mark is a write only the current owner can make, and the hand-off is an outbox row written in the same transaction, which a relay then publishes to the queue.</span></span></li>
     <li><b>Executed</b><span>A worker takes it, marks it <code>running</code>, does the work (calls the endpoint, or starts the container) and sends heartbeats while it waits.</span></li>
-    <li><b>Finished</b><span>Success marks it <code>succeeded</code>. Failure schedules a retry with backoff, or marks it <code>dead</code> after the last attempt. If the worker dies, a reaper notices the missing heartbeats and puts the run back to <code>pending</code>.</span></li>
+    <li><b>Finished</b><span>Success marks it <code>succeeded</code>. Failure schedules a retry with backoff, or marks it <code>dead</code> after the last attempt. If the worker dies, a reaper notices the missing heartbeats and treats it the same way.</span></li>
   </ol>
 
   <h3>The six ideas that make it work</h3>
   <div class="ideas">
-    <a href="#scheduler" class="k-sched"><strong>Partitions with leases</strong><span>Many scheduler nodes, but each run handled by exactly one</span></a>
-    <a href="#scheduler" class="k-sched"><strong>Fencing tokens</strong><span>A frozen node waking up and acting on stale ownership</span></a>
-    <a href="#timing-wheel" class="k-sched"><strong>In-memory timing wheel</strong><span>Firing within one tick (for example 100 ms) of the due time without querying the database constantly</span></a>
-    <a href="#dispatch" class="k-queue"><strong>Queue between scheduler and workers</strong><span>Slow runs never delaying scheduling</span></a>
-    <a href="#correctness" class="k-work"><strong>Retries that are safe to repeat</strong><span>Crashes cause retries; retries must be harmless</span></a>
-    <a href="#load" class="k-queue"><strong>Peak-aware policies</strong><span>Everyone schedules at :00</span></a>
+    <a href="#scheduler" class="k-sched"><strong>Partitions with leases</strong><span>Each run is handled by exactly one of many scheduler nodes</span></a>
+    <a href="#scheduler" class="k-sched"><strong>Fencing tokens</strong><span>Writes from a node that lost ownership are rejected</span></a>
+    <a href="#timing-wheel" class="k-sched"><strong>In-memory timer buffer</strong><span>A timing wheel or heap fires runs on time without querying the database constantly</span></a>
+    <a href="#dispatch" class="k-queue"><strong>Queue between scheduler and workers</strong><span>Slow runs never delay scheduling</span></a>
+    <a href="#correctness" class="k-work"><strong>Retries that are safe to repeat</strong><span>Crashes cause retries, and every retry is harmless</span></a>
+    <a href="#load" class="k-queue"><strong>Peak-aware policies</strong><span>The :00 burst is absorbed without starving urgent runs</span></a>
   </div>
 </section>
 
 <section id="api" class="k-api" data-toc="API service" data-num="1" data-group="Components" data-nodes="api"
-  data-more2="an example create request and response, and what create, edit, cancel and retry each do"
-  data-more3="safe retries of create, validation, tenancy and error codes">
+  data-more2="what create, edit, cancel and retry each do for the caller"
+  data-more3="an example create request, how each call works in the store, safe retries of create, runs due very soon, validation, tenancy and error codes">
   <div class="sh"><h2><span class="num">1</span>API service</h2></div>
   <p class="lede">Clients use one small REST API to create jobs, cancel them and read their runs. A request is accepted only once the job and its first run are committed to the job store.</p>
   <div class="scroll"><table>
@@ -476,8 +490,19 @@ pre .tc{color:var(--muted);font-style:italic}
     <tr><td><code>POST /v1/runs/{run_id}/cancel</code></td><td>Cancel one run that has not finished</td></tr>
   </table></div>
   <div data-l="2">
+    <h3>What each call does</h3>
+    <ul>
+      <li><strong>Create</strong> answers only after the job and its first run are committed together, so an accepted job is durable.</li>
+      <li><strong>Edit</strong> changes the schedule, spec or policies. The next run that has not started is replaced to match; runs already started keep the settings they began with.</li>
+      <li><strong>Cancel a job</strong> stops it scheduling more runs. Runs not yet started are cancelled; runs already executing finish but are not retried.</li>
+      <li><strong>Cancel a run</strong> stops one run that has not finished. For a cron job, the rest of the series carries on.</li>
+      <li><strong>Retry</strong> sends a dead run back to pending under the same run id, so the receiver sees the same idempotency key.</li>
+    </ul>
+  </div>
+  <div data-l="3">
     <h3>Creating a job</h3>
 <pre><code>POST /v1/jobs
+Idempotency-Key: 6c1e0b2d-reports-daily
 {
   "schedule": "0 9 * * *",
   "timezone": "Europe/Madrid",
@@ -495,69 +520,71 @@ pre .tc{color:var(--muted);font-style:italic}
 
 201 Created
 { "job_id": "j_7f3a", "next_run_at": "2026-11-17T08:00:00Z" }</code></pre>
-    <p>A one-off job sends <code>"run_at": "2026-11-17T09:00:00Z"</code> in place of <code>schedule</code>. <code>kind</code> chooses which executor runs the job, and <code>spec</code> holds that kind’s settings; a container job sends <code>"kind": "container"</code> with an image, command and resource limits instead (example in the <a href="#job-store">job store</a>). The body maps one to one onto the <code>jobs</code> table in the <a href="#job-store">job store</a>.</p>
-    <h3>What each call does</h3>
+    <p>A one-off job sends <code>"run_at": "2026-11-17T09:00:00Z"</code> in place of <code>schedule</code>. <code>kind</code> chooses which executor runs the job, and <code>spec</code> holds that kind’s settings, including its timeout; a container job sends <code>"kind": "container"</code> with an image, command and resource limits instead (example in the <a href="#job-store">job store</a>). Each body field maps to a column of the <code>jobs</code> table; the idempotency key arrives as a header. <code>backoff_base</code> and <code>backoff_cap</code> are optional and default to 2 s and 5 minutes. <code>next_run_at</code> in the response is not stored on the job: it is the <code>scheduled_at</code> of the job’s pending run that has not been attempted.</p>
+    <h3>How each call works in the store</h3>
     <ul>
       <li><strong>Create</strong> inserts the job row and its first pending run in one transaction, then answers. The job is durable from the moment that commit succeeds.</li>
-      <li><strong>Edit</strong> changes the definition and replaces the job’s next run in the same transaction: the pending run that has not been attempted yet (<code>attempt = 0</code>) moves to <code>cancelled</code>, and a new one is inserted from the new schedule. Every edit also raises the job’s <code>version</code>. Runs copy it, and a first attempt is dispatched only while its version still matches the job, so a run planned under the old schedule can never fire next to the new one. Runs that have already started, including those waiting to retry, keep the spec and policies they copied and are not affected.</li>
-      <li><strong>Cancel a job</strong> sets the job’s <code>status</code> to <code>cancelled</code> and moves its pending runs to the <code>cancelled</code> state, in one transaction. The rows stay, so the job and its history remain queryable. A run already loaded by a scheduler is not hunted down; its conditional update finds no pending row when it fires. Runs already dispatched or running have their own lifecycle and continue, but they are not retried after a failure and create no next run, because both of those steps check that the job is still <code>active</code>.</li>
-      <li><strong>Cancel a run</strong> stops one run that has not finished. A pending or dispatched run moves straight to <code>cancelled</code> with a conditional update (<code>WHERE state IN ('pending', 'dispatched')</code>), so a worker that later receives it from the queue finds that its claim matches no rows. A running run gets <code>cancel_requested_at</code>; its worker sees that on the next heartbeat, stops the container or abandons the HTTP call (which may already have taken effect), and records <code>cancelled</code> with its fenced result write.</li>
-      <li><strong>Retry</strong> resets the same dead run to pending. It keeps its run id, so the receiver sees the same idempotency key. It does not reset <code>attempt</code>: it raises the run’s attempt limit by the job’s <code>max_attempts</code>, so the retry gets a fresh budget while <code>attempt</code> keeps counting up (<a href="#dispatch">dispatch queue and workers</a> explains why the counter must never go back). Retry is refused if the job has been cancelled.</li>
+      <li><strong>Edit</strong> changes the definition and replaces the job’s next run in the same transaction: the pending run that has not been attempted yet (<code>attempt = 0</code>) moves to <code>cancelled</code> with <code>cancel_reason = 'replaced_by_edit'</code>, and a new one is inserted from the new schedule. The uniqueness rule on <code>(job_id, scheduled_at)</code> leaves cancelled rows out, so when only the spec or policies change, the replacement takes the same scheduled time without a conflict. Every edit also raises the job’s <code>version</code>. Runs copy it, and a first attempt is dispatched only while its version still matches the job, so a run planned under the old schedule can never fire next to the new one. Runs that have already started, including those waiting to retry, keep the spec and policies they copied and are not affected.</li>
+      <li><strong>Cancel a job</strong> sets the job’s <code>status</code> to <code>cancelled</code>, raises its <code>version</code>, and moves its pending runs to the <code>cancelled</code> state (<code>cancel_reason = 'job_cancelled'</code>), in one transaction. The rows stay, so the job and its history remain queryable. A run already loaded by a scheduler is not hunted down; its conditional update finds no pending row when it fires. Runs already dispatched or running continue, but they create no next run, and a failure moves them to <code>cancelled</code> with <code>last_error</code> kept instead of retrying them. Both checks sit inside the writes themselves (the dispatch write and the worker’s failure write), so a cancel that commits mid-transaction cannot slip past them.</li>
+      <li><strong>Cancel a run</strong> moves a pending or dispatched run straight to <code>cancelled</code> with a conditional update (<code>WHERE state IN ('pending', 'dispatched')</code>), setting <code>cancelled_at</code> and <code>cancel_reason = 'client'</code>, so a worker that later receives it from the queue finds that its claim matches no rows. If it was the pending run of an active cron job, the same transaction inserts its successor, computed from its scheduled time, so cancelling one run never ends the series. A running run gets <code>cancel_requested_at</code>; its worker sees that on the next heartbeat, stops the container or abandons the HTTP call (which may already have taken effect), and records <code>cancelled</code> with its fenced result write.</li>
+      <li><strong>Retry</strong> resets the same dead run to pending. It keeps its run id, so the receiver sees the same idempotency key. It does not reset <code>attempt</code>: it raises the run’s attempt limit by the job’s <code>max_attempts</code>, so the retry gets a fresh budget while <code>attempt</code> keeps counting up (<a href="#dispatch">dispatch queue and workers</a> explains why the counter must never go back). It also adds one to <code>manual_retries</code>, sets <code>last_retried_at</code>, and records <code>attempts_before_retry = attempt</code>, so backoff starts again from its base. Retry is refused if the job has been cancelled, or once the run has been dead for longer than the 14-day window.</li>
     </ul>
-  </div>
-  <div data-l="3">
     <h3>Details that matter</h3>
     <ul>
-      <li><strong>Safe retries of create.</strong> The client sends its own <code>Idempotency-Key</code> header on <code>POST /v1/jobs</code>, so a create that timed out and was sent again does not produce two jobs. The key is stored on the job under <code>UNIQUE (tenant_id, idempotency_key)</code>; a repeated create hits the constraint and returns the job created the first time.</li>
-      <li><strong>Runs due very soon.</strong> When a job is created with its first run due inside the scheduler’s 30-second lookahead window, that run is pushed straight to the node that owns its partition, so it does not wait for the next poll.</li>
+      <li><strong>Safe retries of create.</strong> The client sends its own <code>Idempotency-Key</code> header on <code>POST /v1/jobs</code>, so a create that timed out and was sent again does not produce two jobs. When the header is present, the API derives <code>job_id</code> from a hash of <code>(tenant_id, idempotency_key)</code>, so a repeat maps to the same job id, the same partition and the same shard. The key is stored on the job under <code>UNIQUE (tenant_id, idempotency_key)</code>, which therefore only ever has to be checked on one shard; a repeated create hits the constraint and returns the job created the first time.</li>
+      <li><strong>Runs due very soon.</strong> A job created inside the scheduler’s 30-second lookahead window is pushed straight to the node that owns its partition, so its first run does not wait for the next poll.</li>
       <li><strong>Validation at the door.</strong> Reject cron expressions that do not parse, unknown time zones, and specs that fail their kind’s schema. Each kind adds its own checks: an HTTP URL must not point at internal addresses (checked again when the worker connects, because DNS can change in between); a container image must come from the tenant’s allowed registries, with CPU and memory inside its quota.</li>
       <li><strong>Tenancy.</strong> The API derives the tenant from the authenticated caller and ignores any tenant named in the body. Every read and write is scoped to it, and create is rate-limited per tenant.</li>
-      <li><strong>Errors.</strong> <code>400</code> for an invalid schedule or spec, <code>404</code> for a job or run the tenant does not own, <code>409</code> for retrying a run that is not dead or whose job is cancelled, or cancelling a run that has already finished, <code>429</code> when the tenant is over its rate limit.</li>
+      <li><strong>Errors.</strong> <code>400</code> for an invalid schedule or spec, <code>404</code> for a job or run the tenant does not own, <code>409</code> for retrying a run that is not dead, whose job is cancelled or whose 14-day window has passed, or cancelling a run that has already finished, <code>429</code> when the tenant is over its rate limit.</li>
     </ul>
   </div>
 </section>
 
 <section id="job-store" class="k-store" data-toc="Job store" data-num="2" data-nodes="store"
-  data-more2="the two kinds of record, the schema, copying instead of referencing, the “what’s due” index, sharding and cron run creation"
-  data-more3="example rows for all four tables, the index list, choosing a database by scale and keeping the hot table small">
+  data-more2="the two kinds of record, the schema, copying instead of referencing, the “what’s due” index, sharding, cron run creation and misfires, checking the series, and surviving a database failure"
+  data-more3="example rows, the index list, daylight-saving changes, the series check query, why counters never move backwards, choosing a database by scale and keeping the hot table small">
   <div class="sh"><h2><span class="num">2</span>Job store</h2></div>
   <p class="lede">The job store is the single source of truth: every other component can crash and rebuild its state from it.</p>
   <div data-l="2">
     <p>It holds two kinds of record, because they behave differently.</p>
     <div class="scroll"><table>
       <tr><th>Record</th><th>What it is</th><th>How often it changes</th></tr>
-      <tr><td>Job definition</td><td>Schedule, what to run (kind and spec), retry policy, priority, owner</td><td>Rarely, when someone edits it</td></tr>
+      <tr><td>Job definition</td><td>Schedule or one-off time, what to run (kind and spec), retry policy, priority, owner</td><td>Rarely, when someone edits it</td></tr>
       <tr><td>Run</td><td>One scheduled occurrence of a job: <code>run_id</code>, <code>job_id</code>, <code>scheduled_at</code>, <code>state</code>, <code>attempt</code>, <code>partition_id</code></td><td>Constantly: created, claimed, retried, finished</td></tr>
     </table></div>
   </div>
-  <p>A run moves through states: <code>pending</code> → <code>dispatched</code> → <code>running</code> → <code>succeeded</code>, or back to <code>pending</code> for a retry, or to <code>dead</code> when retries run out. A run cancelled before it finishes moves to <code>cancelled</code>.</p>
-  <figure><div class="scroll"><svg viewBox="0 0 720 236" style="min-width:560px" role="img" aria-label="Run states: pending to dispatched to running, then succeeded or dead; a failed or abandoned run returns to pending, a dead run can be retried manually, and a pending run becomes cancelled when its job is cancelled.">
+  <p>A run moves through states: <code>pending</code> → <code>dispatched</code> → <code>running</code> → <code>succeeded</code>, or back to <code>pending</code> for a retry, or to <code>dead</code> when retries run out. A run cancelled before it finishes moves to <code>cancelled</code>.<span data-l="2"> A run passed over by the skip misfire policy moves to <code>skipped</code>, and a dispatched run that no worker claims in time goes back to <code>pending</code> through the sweeper.</span></p>
+  <figure><div class="scroll"><svg viewBox="0 0 720 236" style="min-width:560px" role="img" aria-label="Run states: pending to dispatched to running, then succeeded or dead; a failed or abandoned run returns to pending, an unclaimed dispatched run is returned to pending by the sweeper, a dead run can be retried manually, a pending run becomes cancelled when it or its job is cancelled, and an overdue run under the skip policy becomes skipped.">
     <g class="k-sched"><rect class="box" x="30" y="70" width="120" height="44" rx="9"/><text class="t" x="90" y="92" text-anchor="middle" dominant-baseline="central">pending</text></g>
     <g style="--k:var(--muted)"><rect class="box" x="30" y="2" width="120" height="36" rx="9"/><text class="t" x="90" y="20" text-anchor="middle" dominant-baseline="central">cancelled</text></g>
     <path class="wire" marker-end="url(#ah)" d="M90 70V39"/><text class="s" x="84" y="57" text-anchor="end">cancelled</text>
+    <g style="--k:var(--muted)"><rect class="box" x="210" y="2" width="120" height="36" rx="9"/><text class="t" x="270" y="20" text-anchor="middle" dominant-baseline="central">skipped</text></g>
+    <path class="wire" marker-end="url(#ah)" d="M140 70 214 39"/><text class="s" x="224" y="55" text-anchor="start">misfire: skip</text>
     <g class="k-sched">
     <rect class="box" x="210" y="70" width="120" height="44" rx="9"/><text class="t" x="270" y="92" text-anchor="middle" dominant-baseline="central">dispatched</text></g>
     <g class="k-work"><rect class="box" x="390" y="70" width="120" height="44" rx="9"/><text class="t" x="450" y="92" text-anchor="middle" dominant-baseline="central">running</text></g>
     <g class="k-store"><rect class="box" x="580" y="16" width="120" height="44" rx="9"/><text class="t" x="640" y="38" text-anchor="middle" dominant-baseline="central">succeeded</text></g>
     <g style="--k:var(--bad)"><rect class="box" x="580" y="124" width="120" height="44" rx="9"/><text class="t" x="640" y="146" text-anchor="middle" dominant-baseline="central">dead</text></g>
-    <path class="wire" marker-end="url(#ah)" d="M150 92H209"/><text class="s" x="180" y="62" text-anchor="middle">scheduler</text><text class="s" x="180" y="76" text-anchor="middle">fires</text>
+    <path class="wire" marker-end="url(#ah)" d="M150 92H209"/><text class="s" x="180" y="86" text-anchor="middle">fires</text>
+    <path class="wire" marker-end="url(#ah)" d="M250 114V132Q250 138 244 138H136Q130 138 130 132V115"/><text class="s" x="190" y="152" text-anchor="middle">sweeper: not claimed</text>
     <path class="wire" marker-end="url(#ah)" d="M330 92H389"/><text class="s" x="360" y="62" text-anchor="middle">worker</text><text class="s" x="360" y="76" text-anchor="middle">claims</text>
     <path class="wire" marker-end="url(#ah)" d="M510 82 579 44"/><text class="s" x="530" y="50" text-anchor="middle">success</text>
     <path class="wire" marker-end="url(#ah)" d="M510 102 579 138"/><text class="s" x="522" y="140" text-anchor="middle">attempts</text><text class="s" x="522" y="154" text-anchor="middle">used up</text>
     <path class="wire" marker-end="url(#ah)" d="M430 114V164Q430 174 420 174H120Q110 174 110 164V115"/><text class="s" x="270" y="167" text-anchor="middle">failure or lost worker: retry with backoff</text>
     <path class="wire" marker-end="url(#ah)" d="M640 168V204Q640 214 630 214H70Q60 214 60 204V115"/><text class="s" x="350" y="207" text-anchor="middle">manual retry from the dead-letter queue</text>
   </svg></div>
-  <figcaption><code>succeeded</code> and <code>cancelled</code> are final. <code>dead</code> is final unless a client retries the run through the API, which sends it back to <code>pending</code>. A run can also be cancelled while dispatched or running; those arrows are left out to keep the diagram readable. Every failure path, whether a failed call, a dead worker or a manual retry, sends the run back to <code>pending</code>, where the normal flow picks it up again.</figcaption></figure>
+  <figcaption><code>succeeded</code>, <code>cancelled</code> and <code>skipped</code> are final. <code>dead</code> is final unless a client retries the run through the API. A failed attempt or a lost worker sends the run back to <code>pending</code> while attempts remain, otherwise to <code>dead</code>; a manual retry sends a dead run back to <code>pending</code>. A run can also be cancelled while dispatched or running, and a running run of a cancelled job that fails moves to <code>cancelled</code>; those arrows are left out to keep the diagram readable.</figcaption></figure>
 
   <div data-l="2">
     <h3>The schema</h3>
     <figure><div class="schema">
-      <div><h4>jobs <small>one row per definition</small></h4><ul><li>job_id <i class="pk">key</i></li><li>tenant_id</li><li>idempotency_key <i>unique per tenant</i></li><li>status <i>active, cancelled</i></li><li>version <i>raised on every edit</i></li><li>schedule</li><li>timezone</li><li>priority</li><li>max_attempts</li><li>backoff_base, backoff_cap</li><li>misfire_policy</li><li>kind <i>http, container</i></li><li>spec</li><li>created_at</li><li>updated_at</li><li>cancelled_at</li></ul></div>
-      <div><h4>runs <small>one row per scheduled occurrence</small></h4><ul><li>run_id <i class="pk">key</i></li><li>job_id <i>refers to jobs</i></li><li>tenant_id <i>copied</i></li><li>job_version <i>copied</i></li><li>partition_id <i>refers to leases</i></li><li>scheduled_at</li><li>next_run_at</li><li>state</li><li>attempt</li><li>worker_id</li><li>lease_expires_at</li><li>cancel_requested_at</li><li>kind, spec <i>copied</i></li><li>priority, misfire_policy <i>copied</i></li><li>max_attempts, backoff <i>copied</i></li><li>started_at</li><li>finished_at</li><li>last_error</li><li>created_at</li><li>updated_at</li></ul></div>
-      <div><h4>leases <small>one row per partition</small></h4><ul><li>partition_id <i class="pk">key</i></li><li>owner</li><li>epoch</li><li>expires_at</li></ul></div>
-      <div><h4>outbox <small>one row per unpublished event</small></h4><ul><li>event_id <i class="pk">key</i></li><li>run_id <i>refers to runs</i></li><li>payload</li><li>created_at</li></ul></div>
+      <div><h4>jobs <small>one row per definition</small></h4><ul><li>job_id <i class="pk">key</i></li><li>tenant_id</li><li>partition_id <i>hash of job_id</i></li><li>idempotency_key <i>unique per tenant</i></li><li>status <i>active, completed, cancelled</i></li><li>version <i>raised on every edit and cancel</i></li><li>schedule <i>cron; NULL if one-off</i></li><li>run_at <i>one-off; NULL if cron</i></li><li>timezone</li><li>priority <i>rank: critical 0 … low 3</i></li><li>max_attempts</li><li>backoff_base, backoff_cap</li><li>misfire_policy</li><li>kind <i>http, container</i></li><li>spec</li><li>created_at</li><li>updated_at</li><li>cancelled_at</li></ul></div>
+      <div><h4>runs <small>one row per scheduled occurrence</small></h4><ul><li>run_id <i class="pk">key</i></li><li>job_id <i>refers to jobs</i></li><li>tenant_id <i>copied</i></li><li>job_version <i>copied</i></li><li>partition_id <i>refers to leases</i></li><li>scheduled_at <i>UTC, never changes</i></li><li>next_attempt_at</li><li>state <i>see the diagram</i></li><li>attempt</li><li>worker_id</li><li>heartbeat_deadline <i>visibility timeout</i></li><li>dispatched_at</li><li>cancel_requested_at</li><li>cancelled_at</li><li>cancel_reason <i>who or what cancelled it</i></li><li>kind, spec <i>copied</i></li><li>priority, misfire_policy <i>copied</i></li><li>max_attempts <i>copied; retry may raise it</i></li><li>backoff <i>copied</i></li><li>manual_retries, last_retried_at</li><li>attempts_before_retry</li><li>started_at <i>set by the claim</i></li><li>finished_at</li><li>last_error</li><li>created_at</li><li>updated_at</li></ul></div>
+      <div><h4>leases <small>one row per partition</small></h4><ul><li>partition_id <i class="pk">key</i></li><li>owner <i>NULL when released</i></li><li>epoch <i>never goes down</i></li><li>expires_at</li></ul></div>
+      <div><h4>outbox <small>one row per unpublished event</small></h4><ul><li>event_id <i class="pk">key</i></li><li>partition_id</li><li>run_id <i>refers to runs</i></li><li>priority <i>copied</i></li><li>payload</li><li>created_at</li></ul></div>
+      <div><h4>tenants <small>one row per tenant</small></h4><ul><li>tenant_id <i class="pk">key</i></li><li>max_concurrent_runs <i>default 300</i></li><li>per_endpoint_limit <i>default 50</i></li><li>rate_limit</li><li>updated_at <i>when a quota was raised</i></li></ul></div>
     </div>
-    <figcaption><code>runs</code> is the hot table: every claim, retry and result is a write to it. “Copied” columns are snapshots taken from the job when the run is created. <code>started_at</code> and <code>finished_at</code> feed the scheduling-lag and duration metrics; <code>last_error</code> is what the dead-letter view shows.</figcaption></figure>
+    <figcaption><code>runs</code> is the hot table: every claim, retry and result is a write to it. “Copied” columns are snapshots taken from the job when the run is created. <code>started_at</code>, set when a worker claims the run, feeds scheduling lag (<code>started_at − scheduled_at</code>); <code>dispatched_at</code> feeds dispatch lag and the sweeper; <code>last_error</code> is what the dead-letter view shows. A one-off job moves to <code>completed</code> in the same transaction that moves its run to a final state.</figcaption></figure>
   </div>
 
   <div data-l="3">
@@ -567,7 +594,7 @@ pre .tc{color:var(--muted);font-style:italic}
       <tr><th>job_id</th><th>tenant_id</th><th>status</th><th>kind</th><th>schedule</th><th>timezone</th><th>priority</th><th>max_attempts</th><th>misfire_policy</th></tr>
       <tr><td>j_7f3a</td><td>t_acme</td><td>active</td><td>http</td><td><code>0 9 * * *</code></td><td>Europe/Madrid</td><td>high</td><td>5</td><td>coalesce</td></tr>
       <tr><td>j_91bc</td><td>t_acme</td><td>active</td><td>container</td><td><code>*/5 * * * *</code></td><td>UTC</td><td>normal</td><td>3</td><td>skip</td></tr>
-      <tr><td>j_c204</td><td>t_globex</td><td>cancelled</td><td>http</td><td>one-off</td><td>UTC</td><td>critical</td><td>8</td><td>fire_all</td></tr>
+      <tr><td>j_c204</td><td>t_globex</td><td>cancelled</td><td>http</td><td>NULL (one-off: <code>run_at</code> 2026-11-16 12:00Z)</td><td>UTC</td><td>critical</td><td>8</td><td>fire_all</td></tr>
     </table></div>
     <p>The <code>spec</code> column holds what to run, in the shape its <code>kind</code> defines. j_7f3a is an HTTP call:</p>
 <pre><code>{
@@ -577,7 +604,7 @@ pre .tc{color:var(--muted);font-style:italic}
   "body": { "report": "sales" },
   "timeout_seconds": 30
 }</code></pre>
-    <p>j_91bc is a container task:</p>
+    <p>j_91bc is a container job:</p>
 <pre><code>{
   "image": "registry.acme.example/inventory-sync:1.4",
   "command": ["sync", "--since", "5m"],
@@ -588,7 +615,7 @@ pre .tc{color:var(--muted);font-style:italic}
 }</code></pre>
     <p><strong><code>runs</code>: one row per scheduled occurrence of a job.</strong> Times below are UTC on 2026-11-16. <code>tenant_id</code> and the timestamp columns are left out to keep the table narrow.</p>
     <div class="scroll"><table>
-      <tr><th>run_id</th><th>job_id</th><th>partition_id</th><th>scheduled_at</th><th>next_run_at</th><th>state</th><th>attempt</th><th>worker_id</th></tr>
+      <tr><th>run_id</th><th>job_id</th><th>partition_id</th><th>scheduled_at</th><th>next_attempt_at</th><th>state</th><th>attempt</th><th>worker_id</th></tr>
       <tr><td>r_5001</td><td>j_7f3a</td><td>17</td><td>08:00:00</td><td>08:00:00</td><td>succeeded</td><td>1</td><td>NULL</td></tr>
       <tr><td>r_4990</td><td>j_91bc</td><td>203</td><td>14:25:00</td><td>14:25:06</td><td>dead</td><td>3</td><td>NULL</td></tr>
       <tr><td>r_5002</td><td>j_91bc</td><td>203</td><td>14:30:00</td><td>14:30:02</td><td>running</td><td>2</td><td>worker-4</td></tr>
@@ -596,9 +623,9 @@ pre .tc{color:var(--muted);font-style:italic}
     </table></div>
     <p>How to read these rows:</p>
     <ul>
-      <li><code>scheduled_at</code> is the intended time and never changes. <code>next_run_at</code> is when to try next, so it moves forward on every retry.</li>
+      <li><code>scheduled_at</code> is the intended time and never changes. <code>next_attempt_at</code> is when to try next, so it moves forward on every retry. The API’s <code>next_run_at</code> is a different thing: the <code>scheduled_at</code> of the job’s pending run that has not been attempted.</li>
       <li>r_5001 is a run of the 09:00 Madrid job: 08:00 UTC in winter. It succeeded on the first attempt.</li>
-      <li>r_5002 failed once at 14:30:00, waited its backoff (2 s here), and is on attempt 2 with worker-4. Its <code>lease_expires_at</code> is 14:31:02; with no result by then, the reaper returns it to <code>pending</code>.</li>
+      <li>r_5002 failed once at 14:30:00, waited its backoff (2 s here), and is on attempt 2 with worker-4. Its <code>heartbeat_deadline</code> is 14:31:02; with no heartbeat or result by then, the reaper returns it to <code>pending</code> after a backoff.</li>
       <li>r_4990 used all 3 of its job’s <code>max_attempts</code> (at :00, :02 and :06; the delays are shown without jitter to keep the example readable) and is now in the DLQ.</li>
       <li>All runs of j_91bc share partition 203, because the partition is a hash of <code>job_id</code>.</li>
     </ul>
@@ -612,39 +639,83 @@ pre .tc{color:var(--muted);font-style:italic}
     <p>Partition 203 has changed hands seven times. Only a write carrying epoch 7 can dispatch its runs.</p>
     <p><strong><code>outbox</code>: one row per event waiting to be published.</strong> The relay deletes a row once the queue acknowledges it. The row shown was published a moment ago and is about to be deleted.</p>
     <div class="scroll"><table>
-      <tr><th>event_id</th><th>run_id</th><th>payload</th><th>created_at</th></tr>
-      <tr><td>88121</td><td>r_5002</td><td><code>{"run_id":"r_5002"}</code></td><td>14:30:02</td></tr>
+      <tr><th>event_id</th><th>partition_id</th><th>run_id</th><th>priority</th><th>payload</th><th>created_at</th></tr>
+      <tr><td>88121</td><td>203</td><td>r_5002</td><td>2 (normal)</td><td><code>{"run_id":"r_5002"}</code></td><td>14:30:02</td></tr>
     </table></div>
     <p><strong>Indexes, one per reader.</strong></p>
     <div class="scroll"><table>
       <tr><th>Index</th><th>Used by</th></tr>
-      <tr><td><code>(partition_id, state, next_run_at)</code></td><td>Scheduler: what is due in my partition</td></tr>
-      <tr><td><code>(state, lease_expires_at)</code></td><td>Reaper: runs whose worker went silent</td></tr>
-      <tr><td><code>UNIQUE (job_id, scheduled_at)</code></td><td>Run creation: a repeated insert becomes a no-op</td></tr>
+      <tr><td><code>(partition_id, state, next_attempt_at)</code></td><td>Scheduler: what is due in my partition</td></tr>
+      <tr><td><code>(state, heartbeat_deadline)</code></td><td>Reaper: runs whose worker went silent</td></tr>
+      <tr><td><code>(state, dispatched_at)</code></td><td>Sweeper: dispatched runs nobody claimed</td></tr>
+      <tr><td><code>UNIQUE (job_id, scheduled_at) WHERE state &lt;&gt; 'cancelled'</code></td><td>Run creation: a repeated insert becomes a no-op; cancelled rows are left out so a replacement can reuse their time</td></tr>
       <tr><td><code>(tenant_id, state)</code></td><td>DLQ: a tenant’s dead runs</td></tr>
       <tr><td><code>jobs: UNIQUE (tenant_id, idempotency_key)</code></td><td>Create: a repeated request returns the first job</td></tr>
+      <tr><td><code>jobs: (partition_id, status)</code></td><td>Series check: the active jobs of my partition</td></tr>
+      <tr><td><code>outbox: (partition_id, priority, event_id)</code></td><td>Relay: what to publish next, urgent first</td></tr>
     </table></div>
+    <p>The partial unique index is Postgres syntax. MySQL has no partial indexes; the same rule is a generated column, <code>live_at = IF(state = 'cancelled', NULL, scheduled_at)</code>, with <code>UNIQUE (job_id, live_at)</code>, since rows whose value is NULL never collide. <code>skipped</code> rows stay in the index on purpose: a skipped time must not get a second run.</p>
   </div>
 
   <div data-l="2">
     <h3>Design rules</h3>
     <p><strong>Copy, don’t reference.</strong> When a run is created, copy the spec, timeout and retry policy from the definition into the run row, along with priority, misfire policy and the job’s <code>version</code>. An edit made while the 09:00 run is executing then cannot change that run, and the version lets the dispatch write reject a run planned before the edit.</p>
-    <p><strong>Index for “what’s due”.</strong> The scheduler’s question is always “which pending runs are due before time T?” Index on <code>(partition_id, state, next_run_at)</code> so that is a short range scan, not a full table scan.</p>
-    <div class="brief"><b>Brief: sharding.</b> Splitting one logical table across several database servers, each holding a slice of rows chosen by a key. Here the key is a hash of <code>job_id</code>, so load spreads evenly and one job’s runs stay together.</div>
-    <p><strong>Cron runs are created one at a time.</strong> When a cron run is dispatched, compute the next fire time from the <em>previous scheduled time</em> (not from now) and insert that run in the same transaction, but only if the job’s <code>status</code> is still <code>active</code>. A crash can then never break the series. Add <code>UNIQUE (job_id, scheduled_at)</code> so a retried insert is a harmless no-op.</p>
+    <p><strong>Index for “what’s due”.</strong> The scheduler’s question is always “which pending runs are due before time T?” Index on <code>(partition_id, state, next_attempt_at)</code> so that is a short range scan, not a full table scan.</p>
+    <p><strong>Shard by partition.</strong> The firing second’s 90,000 row writes are more than one primary takes (<a href="#estimates">capacity estimates</a>), so the job store is sharded, and the shard key is the scheduler partition: a partition’s jobs, runs, lease and outbox rows all live on one shard. Every transaction in this design then stays on one shard, and each of the 256 partitions belongs to exactly one of, say, 16 shards.</p>
+    <div class="brief"><b>Brief: sharding.</b> Splitting one logical table across several database servers, each holding a slice of rows chosen by a key. Here the key is the partition, itself a hash of <code>job_id</code>, so load spreads evenly and one job’s runs stay together.</div>
+    <p><strong>Cron runs are created one at a time.</strong> When a cron run is dispatched, compute the next fire time from the <em>previous scheduled time</em> (not from now) and insert that run in the same transaction; the dispatch write itself checks that the job is still <code>active</code>. The dispatch and the insert commit together or not at all, so a crash can delay the series but never break it. Cancelling a pending cron run inserts its successor the same way (<a href="#api">API service</a>). Add <code>UNIQUE (job_id, scheduled_at)</code>, leaving cancelled rows out, so a retried insert is a harmless no-op.</p>
+    <p><strong>Misfires.</strong> When the run being dispatched is overdue by more than a threshold (for example 60 s), the scheduler applies its copied <code>misfire_policy</code>. <em>Fire all</em> dispatches it and computes the next time from its scheduled time, as above, so every missed time gets its run in turn. <em>Coalesce</em> dispatches it once and computes the next time from now, so the missed times in between never get a run. <em>Skip</em> does not dispatch it: it moves it to <code>skipped</code> and computes the next time from now.</p>
+    <p data-l="3"><strong>Daylight-saving changes.</strong> A cron time is evaluated in the job’s own time zone. A local time that does not exist (02:30 on the spring change) runs at the next valid instant, 03:00; a local time that occurs twice (on the autumn change) runs once, at its first occurrence. <code>scheduled_at</code> is stored in UTC, so the unique index sees one value either way.</p>
+    <p><strong>Checking the series.</strong> Creating runs one at a time has one weak point: if anything ever leaves an active cron job with no pending run (a bug, a manual fix in the database, a path nobody thought of), nothing would create the next one. So the owner of each partition also runs a slow check, every few minutes, of one invariant: every active cron job has exactly one pending run that has not been attempted. A job without one gets its next run inserted from now, as its misfire policy says, and the repair is counted. The count should stay at zero; an alert fires when it does not, because a repair means some path broke the chain.</p>
+<pre data-l="3"><code>SELECT j.job_id FROM jobs j                     -- series check
+WHERE j.partition_id = ? AND j.status = 'active'
+  AND j.schedule IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM runs r
+                  WHERE r.job_id = j.job_id
+                    AND r.state = 'pending' AND r.attempt = 0);</code></pre>
   </div>
   <div data-l="3">
-    <p><strong>Pick the store by scale.</strong> Postgres or MySQL comfortably handles thousands of runs per second and gives you transactions and conditional updates. Beyond that, shard it (Vitess for MySQL, Citus for Postgres), or move to Cassandra or DynamoDB with time-bucketed partition keys. Wide-column stores make conditional updates expensive, so many designs keep the hot run table in SQL and move only finished runs to Cassandra or S3 as history.</p>
-    <p><strong>Prune finished runs.</strong> Partition runs by day and drop old partitions, or archive finished runs elsewhere. Row-by-row deletes on a busy table are expensive in every database.</p>
+    <p data-noterm="Partition"><strong>Pick the store by scale.</strong> One Postgres or MySQL primary comfortably sustains roughly 5,000 to 10,000 small writes per second and gives you transactions and conditional updates. At six writes per run that is about 1,000 to 1,500 runs per second in this design, or 2,000 to 3,000 at three writes per run in <a href="#simple-design">the design at lower scale</a>. Beyond that, shard it (Vitess for MySQL, Citus for Postgres), or move to Cassandra or DynamoDB with time-bucketed partition keys. Cassandra makes conditional updates expensive (each is a Paxos round); DynamoDB supports them cheaply per item, but not across items without its transactions. So many designs keep the hot run table in SQL and move only finished runs to Cassandra or S3 as history.</p>
+    <p data-noterm="Partition"><strong>Prune finished runs.</strong> Split the runs table into daily table partitions and drop old ones, or archive finished runs elsewhere; finished one-off jobs go with their runs. Row-by-row deletes on a busy table are expensive in every database.</p>
+  </div>
+
+  <div data-l="2" id="store-failover">
+    <h3>Surviving a database failure</h3>
+    <p>Every guarantee on this page rests on the job store’s commits, so the store’s own failover decides what a database failure can lose. Each shard runs a primary and replicas with automatic failover (Patroni, Orchestrator, or the cloud provider’s). The options differ in when a commit counts as done:</p>
+    <div class="scroll"><table>
+      <tr><th>Option</th><th>A commit is acknowledged when</th><th>Lost on failover</th><th>Cost</th></tr>
+      <tr><td><strong>Asynchronous replication (this design)</strong></td><td>The primary has written it</td><td>The last moments of commits (bounded to about a second here): accepted jobs, dispatches, results</td><td>Nothing extra; the usual default</td></tr>
+      <tr><td>Quorum commit</td><td>The primary and at least one of two or more replicas have it (Postgres <code>ANY 1 (r1, r2)</code>, MySQL semi-sync)</td><td>Nothing</td><td>About 1–2 ms per commit within a region; one slow replica does not stall commits</td></tr>
+      <tr><td>Managed quorum storage</td><td>The storage layer holds it in several zones (Aurora, AlloyDB, Cloud SQL HA)</td><td>Nothing</td><td>No replicas to run yourself; tied to one provider</td></tr>
+    </table></div>
+    <p><strong>This design uses asynchronous replication.</strong> It is the usual default, costs nothing per commit, and a database failover is rare. The price is a loss window, which NFR1 states: writes acknowledged in roughly the last second before the primary died may be gone. Keep the window bounded: failover refuses to promote a replica that lags by more than about a second (Patroni’s <code>maximum_lag_on_failover</code>, or the equivalent elsewhere), and replication lag is watched like any other health signal.</p>
+    <p>What a lost write means, by kind:</p>
+    <ul>
+      <li><strong>A create, edit, cancel or retry.</strong> The client was told it succeeded and it did not. This is the loss NFR1 accepts. A client that sends its create again with the same idempotency key after a failover gets the job back safely; edits and cancels can simply be repeated.</li>
+      <li><strong>A dispatch, with its outbox row and the next cron run.</strong> They were one transaction, so they vanish together and the run is pending again. It is dispatched a second time, and the receiver sees the same run id.</li>
+      <li><strong>A claim, heartbeat or result.</strong> The run falls back to an earlier state and runs again; idempotency absorbs the repeat.</li>
+      <li><strong>A lease claim or a run claim.</strong> The dangerous kind: a fencing counter that moves backwards could be handed out twice. The failover hook below prevents it.</li>
+    </ul>
+    <p>Moving to quorum commit later changes nothing else in the design: the same failover simply loses nothing, and NFR1 drops its exception.</p>
+    <h3 data-l="3">Counters never move backwards</h3>
+    <p data-l="3">With asynchronous replication, a lease claim at epoch 8 can vanish with the old primary, and the next claim hands out 8 again, which is exactly what fencing must never allow; a lost run claim does the same to <code>attempt</code>. So the new primary is promoted with writes blocked, and a failover hook raises every counter by a margin far larger than a second’s worth of increments before writes are let through:</p>
+<pre data-l="3"><code>UPDATE leases SET epoch = epoch + 1000,                -- failover hook
+       owner = NULL, expires_at = now();
+
+UPDATE runs SET attempt = attempt + 1000,
+       max_attempts = max_attempts + 1000,
+       attempts_before_retry = attempts_before_retry + 1000
+WHERE state IN ('pending', 'dispatched', 'running');</code></pre>
+    <p data-l="3">Every lease is expired, so every partition is claimed again with a higher epoch. Every run that is not final moves its attempt counter forward, and its limit and backoff base with it, so the retries left and the backoff are unchanged; only the attempt number the receiver sees jumps. A worker still running an attempt on that shard finds that its next heartbeat matches nothing and stops, and the reaper runs the run again. A failover therefore costs one round of repeats on that shard, and a stale write is never accepted.</p>
   </div>
 </section>
 
 <section id="scheduler" class="k-sched" data-toc="Scheduler" data-num="3" data-nodes="sched lease"
   data-more2="why the obvious designs fail, partitions, leases, fencing with a sequence diagram, and the loop each owner runs"
-  data-more3="failover and rebalancing, tuning the lease TTL, and when to skip all of this">
+  data-more3="the claim, renew and release writes, failover and rebalancing, tuning the lease TTL, and when to skip all of this">
   <div class="sh"><h2><span class="num">3</span>Scheduler</h2></div>
-  <p class="lede">The scheduler fires each run at the right time, exactly once per dispatch, even when scheduler machines crash. The difficulty is coordination: every run must be covered by exactly one machine.</p>
-  <p>The standard answer has three parts. <strong>Partitions</strong> split the job space into fixed slices. A <strong>lease</strong>, a lock that expires unless renewed, gives each slice exactly one owner. <strong>Fencing</strong> makes the storage reject writes from an owner whose lease has passed to someone else.</p>
+  <p class="lede">The scheduler fires each run at the right time, and each firing is made by exactly one scheduler node, even when scheduler machines crash. The difficulty is coordination: every run must be covered by exactly one machine.</p>
+  <p>The standard answer has three parts. <strong>Partitions</strong> split the job space into fixed slices. A <strong>lease</strong>, a lock that expires unless renewed, gives each slice exactly one owner. <strong>Fencing</strong> makes the storage reject writes from an owner whose lease has passed to someone else. Each lease carries a counter, the epoch, raised every time the slice changes owner; the storage rejects writes that carry an older one.</p>
 
   <div data-l="2">
     <h3>Why the obvious designs fail</h3>
@@ -673,13 +744,15 @@ pre .tc{color:var(--muted);font-style:italic}
     <p>A node can freeze: a long garbage-collection pause, a network partition, a VM migration. It wakes up still believing it owns partitions that were reassigned while it slept. If it dispatches now, runs execute twice and state gets overwritten.</p>
     <div class="brief"><b>Brief: fencing token.</b> A number that increases every time ownership changes hands. Every write carries the number its writer was given; the storage rejects any write carrying a number lower than the current one. The stale owner’s writes simply fail.</div>
     <p>The epoch is the fencing token. The dispatch write checks it:</p>
-<pre><code>UPDATE runs SET state = 'dispatched'
+<pre><code>UPDATE runs SET state = 'dispatched', dispatched_at = now()
 WHERE run_id = ?
   AND state = 'pending'
   AND (SELECT epoch FROM leases WHERE partition_id = ?) = ?   -- my epoch
-  AND (attempt > 0 OR job_version =
+  AND (SELECT status FROM jobs WHERE job_id = runs.job_id) = 'active'
+  AND (attempt &gt; 0 OR job_version =
        (SELECT version FROM jobs WHERE job_id = runs.job_id)); -- not replaced by an edit</code></pre>
-    <p>Zero rows affected means the run is no longer this node’s to fire. Either the lease moved, and the node stops working on that partition, or the run was cancelled or replaced by an edit, and the node drops it. The check must live in the storage write itself; a check done earlier in the scheduler’s own memory is exactly what a frozen node gets wrong.</p>
+    <p>Zero rows affected means the run is no longer this node’s to fire. The check must live in the storage write itself; a check done earlier in the scheduler’s own memory is exactly what a frozen node gets wrong. The job’s status is checked in the same statement for the same reason: a cancel that commits while the dispatch transaction runs would not be seen by an earlier read.</p>
+    <p>Zero rows alone does not say why, and the reasons need different reactions, so the node reads the lease and the run once. If the epoch moved, the lease is gone: stop working on that partition. If the run is no longer pending, it was cancelled or replaced: drop it. If it is still pending but its job is cancelled or its version is stale (an edit or a cancel raced the insert of this run), move it to <code>cancelled</code> with a guarded update (<code>WHERE run_id = ? AND state = 'pending'</code>), so it does not come back on every poll.</p>
     <figure><div class="scroll"><svg viewBox="0 0 720 320" style="min-width:600px" role="img" aria-label="Fencing sequence: node A claims partition 17 with epoch 4 and freezes; node B claims it with epoch 5 and dispatches; node A wakes and its write with epoch 4 is rejected by the job store.">
       <g class="k-sched"><rect class="box" x="30" y="10" width="120" height="34" rx="8"/><text class="t" x="90" y="27" text-anchor="middle" dominant-baseline="central">Node A</text>
       <rect class="box" x="210" y="10" width="120" height="34" rx="8"/><text class="t" x="270" y="27" text-anchor="middle" dominant-baseline="central">Leases table</text>
@@ -697,26 +770,41 @@ WHERE run_id = ?
     <figcaption>Read top to bottom as time passing. Node A never learns it was frozen; the only thing that stops its stale write is the job store comparing epochs.</figcaption></figure>
     <h3>The loop each owner runs</h3>
     <ol>
-      <li><strong>Poll ahead.</strong> About once a second: <code>SELECT run_id, next_run_at FROM runs WHERE partition_id = ? AND state = 'pending' AND next_run_at &lt;= now() + 30s</code>. One query per partition per second, however many jobs.</li>
+      <li><strong>Poll ahead.</strong> About once a second: <code>SELECT run_id, next_attempt_at FROM runs WHERE partition_id = ? AND state = 'pending' AND next_attempt_at &lt;= now() + 30s</code>. One query per partition per second, however many jobs.</li>
       <li><strong>Buffer in memory</strong> in a timing wheel or min-heap keyed by fire time (see <a href="#timing-wheel">the timing wheel</a>). Runs created through the API inside the window are pushed straight to the owning node.</li>
-      <li><strong>Fire.</strong> When a run’s time comes, do the fenced update above and insert an outbox row in the same transaction. A relay publishes the row to the dispatch queue (<a href="#dispatch">dispatch queue and workers</a> explains why the scheduler does not publish directly).</li>
-      <li><strong>Reschedule.</strong> For cron jobs, insert the next run in the same transaction as the update, if the job is still <code>active</code>. The new run copies the job’s current <code>version</code>.</li>
+      <li><strong>Fire.</strong> When a run’s time comes, do the fenced update above and insert an outbox row in the same transaction. Dispatches due in the same tick are written as one transaction per partition, in priority order, so at the peak critical and high-priority runs commit and reach the queue first. A relay publishes the rows to the dispatch queue (<a href="#dispatch">dispatch queue and workers</a> explains why the scheduler does not publish directly).</li>
+      <li><strong>Reschedule.</strong> For cron jobs, insert the next run in the same transaction as the update; the update has already checked that the job is <code>active</code>. The new run copies the job’s current <code>version</code>. If the run was overdue, its misfire policy decides whether it is dispatched and where the next time is counted from (<a href="#job-store">job store</a>).</li>
+      <li><strong>Look after the partition.</strong> The owner also runs the partition’s relay, reaper, sweeper and series check, so they fail over with the lease and never run twice.</li>
     </ol>
   </div>
   <div data-l="3">
     <h3>Failover and rebalancing</h3>
-    <p>When a node claims a partition, after a crash or a rebalance, it starts the loop from scratch: query the database, fill its in-memory buffer, continue. Nothing is handed over in memory, which is why failover is simple. Runs that came due during the TTL gap fire late but still fire, so <strong>the TTL is your worst-case failover delay</strong> and the main tuning knob: shorter recovers faster but causes more false expirations during brief network blips.</p>
-    <p>When a node joins, existing nodes release partitions down to about <code>total / nodes</code> each: finish in-flight dispatches, delete the lease, and the new owner claims it with a higher epoch. Release a few at a time to avoid every node reloading at once. Kafka’s consumer groups and Temporal’s shard ownership work this way.</p>
+    <h3>Claiming, renewing and releasing a lease</h3>
+    <p>Two nodes can try to claim the same expired lease at once, and an owner can renew just as another node claims. Each write carries its guard, like every other write on this page:</p>
+<pre><code>UPDATE leases SET owner = ?, epoch = epoch + 1,              -- claim
+       expires_at = now() + interval '20 seconds'
+WHERE partition_id = ? AND expires_at &lt; now()
+RETURNING epoch;
+
+UPDATE leases SET expires_at = now() + interval '20 seconds'  -- renew
+WHERE partition_id = ? AND owner = ? AND epoch = ?;
+
+UPDATE leases SET owner = NULL, expires_at = now()            -- release
+WHERE partition_id = ? AND owner = ? AND epoch = ?;</code></pre>
+    <p><code>now()</code> is the database’s clock, so expiry is decided in one place, never by comparing two machines’ clocks. Of two simultaneous claims, the row lock lets one through and the other matches no rows. A renew that matches no rows means the lease is gone, and the node stops at once. Lease rows are never deleted, so the epoch only ever goes up.</p>
+    <h3>Failover and rebalancing</h3>
+    <p>When a node claims a partition, after a crash or a rebalance, it starts the loop from scratch: query the database, fill its in-memory buffer, continue. Nothing is handed over in memory, which is why failover is simple. Runs that came due during the gap fire late but still fire, in priority order. <strong>The worst-case failover delay is the TTL, plus up to one claim interval for another node to notice, plus one poll</strong>, and the TTL is the main tuning knob: shorter recovers faster but causes more false expirations during brief network blips.</p>
+    <p>When a node joins, existing nodes release partitions down to about <code>total / nodes</code> each: finish in-flight dispatches, release the lease (the statement above), and the new owner claims it with <code>epoch + 1</code>. Release a few at a time to avoid every node reloading at once. Kafka’s consumer-group rebalancing (generation ids) and Temporal’s shard ownership (range ids) follow the same idea: move a few owners at a time and fence the old one.</p>
     <h3>When to skip all of this</h3>
-    <p>Below a few thousand dispatches per second you can skip partitions and leases entirely. See <a href="#simple-design">the design at lower scale</a>: several identical schedulers using <code>SELECT ... FOR UPDATE SKIP LOCKED</code> let the database’s row locks do the coordination.</p>
+    <p>Below about 2,000 runs per second you can skip partitions and leases entirely. See <a href="#simple-design">the design at lower scale</a>: several identical schedulers using <code>SELECT ... FOR UPDATE SKIP LOCKED</code> let the database’s row locks do the coordination.</p>
   </div>
 </section>
 
 <section id="timing-wheel" class="k-sched" data-toc="Timing wheel" data-sub="1" data-nodes="sched"
-  data-more2="the problem it solves, the three options compared, insert and rounds, precision, and how the scheduler uses the wheel"
-  data-more3="hierarchical wheels and a basic implementation in Go">
+  data-more2="the problem it solves, the three options compared, insert and rounds, how the scheduler uses the wheel, and the same job with a min-heap"
+  data-more3="hierarchical wheels, and basic implementations of the wheel and the heap in Go">
   <div class="sh"><h2>Inside the scheduler: the timing wheel</h2></div>
-  <p class="lede">A timing wheel holds a large number of timers cheaply, so the scheduler can fire each run at its exact moment while querying the database only about once a second.</p>
+  <p class="lede">A timing wheel holds a large number of timers cheaply, so the scheduler can fire each run within one tick of its due time while querying the database only about once a second. At this page’s size a min-heap also works; the wheel pays off at much larger timer counts.</p>
   <div data-l="2">
     <h3>The problem</h3>
     <p>Each poll returns every run due in the next 30 seconds, possibly thousands, each due at a different millisecond. Something in memory must hold them and hand each back at the right time. Three options:</p>
@@ -754,7 +842,7 @@ WHERE run_id = ?
     <h3>Hierarchical wheels</h3>
     <p>Round counters waste work: a run ten laps out is visited ten times before it fires. Large systems stack wheels like clock hands: a fine wheel for the next second at 10 ms per slot, a coarser one for the next minute at 1 s per slot. A run starts in the coarsest wheel that covers its delay, and when its slot comes up it moves down to the next finer wheel instead of firing. Kafka uses this for delayed operations; Netty’s <code>HashedWheelTimer</code> is the single-wheel version; the Linux kernel’s timers use a related design.</p>
     <h3>A basic wheel in Go</h3>
-    <p>A single-level wheel with round counters fits in about 70 lines. It is the same structure as the simulation above.</p>
+    <p>A single-level wheel with round counters fits in about 80 lines. It is the same structure as the simulation above. <code>Add</code> takes the due time, not a delay, and rounds the target tick up, so a run never fires before its time and at most one tick after it.</p>
 <pre style="tab-size:4"><code>package wheel
 
 import (
@@ -771,22 +859,29 @@ type Wheel struct {
 	mu    sync.Mutex
 	slots [][]entry
 	cur   int           // slot the pointer is on
+	ticks int64         // ticks since start
+	start time.Time     // when tick 0 happened
 	tick  time.Duration // time covered by one slot
 	fire  func(runID string)
 }
 
 func New(n int, tick time.Duration, fire func(string)) *Wheel {
-	return &amp;Wheel{slots: make([][]entry, n), tick: tick, fire: fire}
+	return &amp;Wheel{slots: make([][]entry, n), start: time.Now(), tick: tick, fire: fire}
 }
 
-// Add schedules runID to fire after delay. O(1).
-func (w *Wheel) Add(runID string, delay time.Duration) {
-	d := int(delay / w.tick)
+// Add schedules runID on the first tick at or after due. O(1).
+func (w *Wheel) Add(runID string, due time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	since := due.Sub(w.start)
+	target := int64(since / w.tick) // tick k happens at start + k*tick
+	if since%w.tick &gt; 0 {
+		target++ // round up, never down: a run must not fire early
+	}
+	d := int(target - w.ticks)
 	if d &lt; 1 {
 		d = 1 // due now or overdue: fire on the next tick
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	n := len(w.slots)
 	slot := (w.cur + d) % n
 	w.slots[slot] = append(w.slots[slot], entry{runID, (d - 1) / n})
@@ -808,6 +903,7 @@ func (w *Wheel) Run(stop &lt;-chan struct{}) {
 
 func (w *Wheel) advance() {
 	w.mu.Lock()
+	w.ticks++
 	w.cur = (w.cur + 1) % len(w.slots)
 	var due []string
 	keep := w.slots[w.cur][:0]
@@ -826,7 +922,7 @@ func (w *Wheel) advance() {
 		w.fire(id) // outside the lock: fire does I/O
 	}
 }</code></pre>
-    <p>Usage: <code>w := wheel.New(600, 100*time.Millisecond, dispatch)</code> gives a 60-second wheel with 100 ms precision; start it with <code>go w.Run(stop)</code> and call <code>w.Add(runID, time.Until(nextRunAt))</code> for each run the poll returns.</p>
+    <p>Usage: <code>w := wheel.New(600, 100*time.Millisecond, dispatch)</code> gives a 60-second wheel with 100 ms precision; start it with <code>go w.Run(stop)</code> and call <code>w.Add(runID, nextAttemptAt)</code> for each run the poll returns.</p>
     <p>What a production version adds:</p>
     <ul>
       <li><strong>Hand-off on fire.</strong> Here <code>fire</code> runs on the ticking goroutine, so a slow dispatch delays the next tick. Send the id to a channel or worker pool instead.</li>
@@ -839,52 +935,189 @@ func (w *Wheel) advance() {
     <ul>
       <li><strong>Deduplicate across polls.</strong> With a 30-second lookahead, each run appears in about 30 consecutive polls. Keep a set of <code>run_id</code>s already in the wheel.</li>
       <li><strong>Due now or overdue: never the current slot.</strong> The pointer has already visited the current slot, so a run placed there waits a whole lap. Fire such a run directly without inserting it, or put it in the next slot and accept up to one tick of delay.</li>
-      <li><strong>Firing means the fenced write plus an outbox row, in one transaction.</strong> Zero rows updated means the run was cancelled or the lease was lost: drop it silently.</li>
+      <li><strong>Firing means the fenced write plus an outbox row, in one transaction.</strong> Zero rows updated is handled as in <a href="#scheduler">the scheduler</a>: stop the partition if the lease moved, otherwise drop the run, or cancel it if it is stale.</li>
       <li><strong>On lease loss, clear that partition’s entries,</strong> so a former owner stops firing runs it no longer owns.</li>
       <li><strong>Cancel lazily.</strong> Don’t search the wheel for a cancelled run; let it fire and fail the conditional update.</li>
       <li><strong>Crashes lose nothing.</strong> The wheel is a cache of the database’s next 30 seconds. A new owner repolls and rebuilds it.</li>
     </ul>
-    <p>At moderate scale, tens of thousands of pending runs, a min-heap or the language’s built-in timers work just as well. The wheel pays off at very large timer counts.</p>
+    <h3>The same job with a min-heap</h3>
+    <p>At this page’s size, at most 30,000 runs in memory before 09:00, a min-heap does the same job, and it is what most schedulers use:</p>
+    <ul>
+      <li><strong>Structure.</strong> One heap per node, ordered by due time (<code>next_attempt_at</code>), plus the same set of run ids already loaded.</li>
+      <li><strong>Insert.</strong> Each poll pushes the runs it has not seen yet: O(log n), about 15 steps at 30,000 entries.</li>
+      <li><strong>Fire.</strong> One loop looks at the earliest entry and sleeps until its due time, or until an earlier run is pushed (the API’s runs due very soon), which wakes it. On waking it pops every entry that is due and fires them as one batch, written in priority order.</li>
+      <li><strong>Lease loss and cancel.</strong> Removing entries from the middle of a heap is costly, so do it lazily: on pop, skip entries whose partition this node no longer owns; cancelled runs fail the fenced write as before.</li>
+      <li><strong>Precision.</strong> A heap wakes at the due time itself rather than at the next tick, limited only by the operating system’s timer.</li>
+    </ul>
+    <p>The cost is O(log n) per insert and pop: at 30,000 entries that is microseconds per run, far below the database write each firing needs. The wheel pays off at hundreds of thousands to millions of timers, or when inserts far outnumber firings.</p>
+  </div>
+  <div data-l="3">
+    <h3>A basic heap buffer in Go</h3>
+    <p>The heap version uses the standard library’s <code>container/heap</code>. Both sketches were checked with tests: a run never fires early, fires within its precision (one tick for the wheel), overdue runs fire at once, and a newly added earlier run wakes the heap’s loop.</p>
+<pre style="tab-size:4"><code>package timers
+
+import (
+	"container/heap"
+	"sync"
+	"time"
+)
+
+type item struct {
+	runID string
+	due   time.Time
+}
+
+// minHeap keeps the earliest due time at index 0.
+type minHeap []item
+
+func (h minHeap) Len() int           { return len(h) }
+func (h minHeap) Less(i, j int) bool { return h[i].due.Before(h[j].due) }
+func (h minHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *minHeap) Push(x any)        { *h = append(*h, x.(item)) }
+func (h *minHeap) Pop() any {
+	old := *h
+	it := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return it
+}
+
+type Buffer struct {
+	mu   sync.Mutex
+	h    minHeap
+	wake chan struct{}         // signalled when a new earliest run arrives
+	fire func(runIDs []string) // one batch per wake-up
+}
+
+func New(fire func([]string)) *Buffer {
+	return &amp;Buffer{wake: make(chan struct{}, 1), fire: fire}
+}
+
+// Add schedules runID to fire at due. O(log n).
+func (b *Buffer) Add(runID string, due time.Time) {
+	b.mu.Lock()
+	earliest := len(b.h) == 0 || due.Before(b.h[0].due)
+	heap.Push(&amp;b.h, item{runID, due})
+	b.mu.Unlock()
+	if earliest {
+		select {
+		case b.wake &lt;- struct{}{}: // the loop re-reads the top
+		default: // a wake-up is already pending
+		}
+	}
+}
+
+// Run sleeps until the earliest run is due, fires everything due, repeats.
+func (b *Buffer) Run(stop &lt;-chan struct{}) {
+	for {
+		b.mu.Lock()
+		now := time.Now()
+		var due []string
+		for len(b.h) &gt; 0 &amp;&amp; !b.h[0].due.After(now) {
+			due = append(due, heap.Pop(&amp;b.h).(item).runID)
+		}
+		wait := time.Minute // nothing loaded: the next poll will Add
+		if len(b.h) &gt; 0 {
+			wait = b.h[0].due.Sub(now)
+		}
+		b.mu.Unlock()
+
+		if len(due) &gt; 0 {
+			b.fire(due) // outside the lock: fire does I/O
+		}
+		t := time.NewTimer(wait)
+		select {
+		case &lt;-stop:
+			t.Stop()
+			return
+		case &lt;-b.wake:
+			t.Stop()
+		case &lt;-t.C:
+		}
+	}
+}</code></pre>
+    <p>Usage: <code>b := timers.New(dispatchBatch)</code>, start it with <code>go b.Run(stop)</code>, and call <code>b.Add(runID, nextAttemptAt)</code> for each run the poll returns that is not already loaded.</p>
   </div>
 </section>
 
 <section id="dispatch" class="k-queue" data-toc="Dispatch queue and workers" data-num="4" data-nodes="queue work"
-  data-more2="choosing the queue, how workers claim and heartbeat, executors per job kind, the transactional outbox and the sweeper"
-  data-more3="the guarded claim, heartbeat, reaper and result writes, a step-by-step timeline of a worker losing its run, and what changes for container jobs">
+  data-more2="choosing the queue, the crash window and the transactional outbox, who runs the relay, reaper and sweeper, how workers claim and heartbeat, and executors per job kind"
+  data-more3="the guarded claim, heartbeat, reaper, result and sweeper writes, a step-by-step timeline of a worker losing its run, and what changes for container jobs">
   <div class="sh"><h2><span class="num">4</span>Dispatch queue and workers</h2></div>
   <p class="lede">The dispatch queue separates <em>deciding when</em> from <em>doing the work</em>, so a slow run can never delay scheduling. Workers pull runs from it, execute them, and report back to the job store.</p>
+  <p>The scheduler records the dispatch and a message to send in one database transaction, so a crash can delay a run but never lose it.</p>
   <div data-l="2">
     <h3>The queue</h3>
     <p>Kafka, SQS or RabbitMQ all work. Use separate queues or topics per priority (and for very large tenants) so a bulk backlog cannot hold up urgent work, and per job kind so each executor pulls only what it can run.</p>
-    <div class="brief"><b>Brief: Kafka offsets and head-of-line blocking.</b> A Kafka consumer records progress as one offset per partition, meaning “everything before here is done”. A run that takes 30 seconds therefore holds back every run behind it in that partition. SQS-style queues acknowledge each message separately and don’t have this problem, which is why many schedulers prefer them for dispatch.</div>
+    <div class="brief" data-noterm="Partition"><b>Brief: Kafka offsets and head-of-line blocking.</b> A consumer in a classic Kafka consumer group records progress as one offset per partition, meaning “everything before here is done”. A run that takes 30 seconds therefore holds back every run behind it in that partition. Kafka’s newer share groups and SQS-style queues acknowledge each message separately and don’t have this problem, which is why many schedulers prefer them for job dispatch.</div>
+    <h3>The crash window between database and queue</h3>
+    <p>Firing a run touches two systems: the database (mark <code>dispatched</code>) and the queue (publish). No transaction spans both, so a naive design must choose what a crash between them does:</p>
+    <div class="scroll"><table>
+      <tr><th>Order</th><th>Crash between the steps</th><th>Result</th></tr>
+      <tr><td>Mark, then publish</td><td>Run marked dispatched, never queued</td><td>Silently lost</td></tr>
+      <tr><td>Publish, then mark</td><td>Run queued, still pending in the database</td><td>Dispatched twice</td></tr>
+    </table></div>
+    <p>If you must choose, prefer the duplicate: receivers can recognise a repeat (see <a href="#correctness">correctness</a>). This design avoids the choice with an outbox:</p>
+    <div class="brief"><b>Brief: transactional outbox.</b> Write the state change <em>and</em> an “outbox” row in one database transaction. A separate relay process reads outbox rows and publishes them to the queue, deleting each after it is acknowledged. The database commit becomes the only decision point, so nothing can be lost; the relay may publish twice, which idempotency absorbs.</div>
+    <figure><div class="flow">
+      <div class="nd k-sched"><b>Scheduler</b><small>fires the run</small></div><span class="ar" aria-hidden="true">→</span>
+      <div class="tx"><small>one database transaction</small>
+        <div class="nd k-store"><b>runs</b><small>state = dispatched</small></div>
+        <div class="nd k-store"><b>outbox</b><small>new event row</small></div></div><span class="ar" aria-hidden="true">→</span>
+      <div class="nd k-api"><b>Relay</b><small>reads, publishes, deletes</small></div><span class="ar" aria-hidden="true">→</span>
+      <div class="nd k-queue"><b>Queue</b><small>may see it twice</small></div><span class="ar" aria-hidden="true">→</span>
+      <div class="nd k-work"><b>Worker</b><small>same run id every time</small></div>
+    </div>
+    <figcaption>The state change and the outbox row commit together or not at all. A crash anywhere after the commit only delays publishing, because the outbox row is still there for the relay to pick up.</figcaption></figure>
+    <p><strong>Who runs the relay, reaper and sweeper.</strong> The scheduler node that holds a partition’s lease runs all three for that partition, so they fail over with the lease and never run twice. The relay is woken by each dispatch commit and also polls every 100 ms, so it adds at most about 100 ms to dispatch, and it publishes high-priority rows first. If it stops, nothing reaches the workers, so alert on the age of the oldest outbox row. The <strong>sweeper</strong> finds runs left in <code>dispatched</code> with no claim for 10 minutes and resets them to <code>pending</code>, to be dispatched again. That timeout sits well above the worst queue wait at the peak (60 s) and the time a run may wait for its tenant’s quota, so it never re-dispatches a healthy backlog. It catches whatever slips through every other mechanism.</p>
     <h3>Workers</h3>
-    <p>A worker takes a run, marks it <code>running</code> with its own id, and starts a <strong>visibility timeout</strong>: a deadline after which the run counts as abandoned. While working it sends <strong>heartbeats</strong> that push the deadline forward. If the worker dies, heartbeats stop, the deadline passes, and a <strong>reaper</strong> (a background sweep) puts the run back to <code>pending</code> for another worker.</p>
-    <p>Workers are <strong>executors</strong>, one pool per job kind. The HTTP executor makes the call; the container executor starts the task on a cluster such as Kubernetes or ECS and watches it until it exits. The scheduler, leases, fencing and outbox never look inside the spec, so supporting a new kind means writing a new executor and nothing else.</p>
+    <p>A worker takes a run, marks it <code>running</code> with its own id, and starts a <strong>visibility timeout</strong>: a deadline, stored in <code>heartbeat_deadline</code>, after which the run counts as abandoned. It is a hold on one run, not a partition lease. While working the worker sends <strong>heartbeats</strong> that push the deadline forward. If the worker dies, heartbeats stop, the deadline passes, and a <strong>reaper</strong> (a background sweep) puts the run back to <code>pending</code> after a backoff, or to <code>dead</code> when its attempts are used up.</p>
+    <p>Each claim raises the run’s attempt counter, and every later write by that worker names the value it got. Once another worker claims the run the number has moved on, so a late write matches nothing.</p>
+    <p>Workers are <strong>executors</strong>, one pool per job kind. The HTTP executor makes the call; the container executor starts the task on a cluster such as Kubernetes or ECS and watches it until it exits. The scheduler, leases, fencing and outbox never look inside the spec. A new kind needs an executor, a validation schema, a queue and a concurrency budget; nothing in scheduling changes.</p>
   </div>
   <div data-l="3">
     <h3>Guarding every worker write</h3>
     <p>Workers and the reaper race each other just as scheduler nodes do, and the queue may deliver the same run twice. Every write they make carries its guard in the <code>WHERE</code> clause. The guard is <code>attempt</code>: the claim raises it, and every later write names the value its writer got.</p>
     <div class="brief"><b>Brief: monotonic fencing token.</b> A number that only ever goes up. Each claim raises <code>attempt</code> by one, and the claiming worker remembers the new value. Its later writes all say <code>WHERE attempt = &lt;my value&gt;</code>, so once anyone else claims the run the number has moved on and the old worker’s writes match no rows. This works only if no value is ever handed out twice. If a manual retry reset <code>attempt</code> to 0, the next claims would reuse 1, 2 and 3, and a worker still holding 3 from before the reset could overwrite the new attempt 3. That is why retry raises the attempt limit instead of resetting the counter.</div>
-<pre><code>UPDATE runs SET state = 'running', worker_id = ?,      -- claim
-       attempt = attempt + 1, lease_expires_at = now() + interval '30 seconds'
+    <p>In the statements below, <code>job_active</code> stands for <code>(SELECT status FROM jobs WHERE job_id = runs.job_id) = 'active'</code>.</p>
+<pre><code>UPDATE runs SET state = 'running', worker_id = ?,           -- claim
+       attempt = attempt + 1, started_at = now(),
+       heartbeat_deadline = now() + interval '30 seconds'
 WHERE run_id = ? AND state = 'dispatched'
 RETURNING attempt;
 
-UPDATE runs SET lease_expires_at = now() + interval '30 seconds'   -- heartbeat
+UPDATE runs SET heartbeat_deadline = now() + interval '30 seconds'   -- heartbeat
 WHERE run_id = ? AND state = 'running' AND attempt = ?
 RETURNING cancel_requested_at;
 
-UPDATE runs SET state = 'pending', worker_id = NULL      -- reaper
-WHERE run_id = ? AND state = 'running' AND attempt = ?
-  AND lease_expires_at &lt; now();
-
-UPDATE runs SET state = 'succeeded'                      -- result
+UPDATE runs SET state = 'succeeded', finished_at = now()   -- result: success
 WHERE run_id = ? AND state = 'running'
-  AND worker_id = ? AND attempt = ?;</code></pre>
-    <p>A claim that matches no rows means another worker already has the run, or it was cancelled: drop the message. A heartbeat that matches no rows means this worker lost the run: stop. The reaper names the attempt it saw expire, so a heartbeat that lands first makes the reset match nothing. If a slow worker’s lease expired and another worker reclaimed the run, the slow worker’s late write affects zero rows and cannot corrupt the newer attempt. <code>RETURNING</code> is Postgres syntax; in MySQL, read the row back in the same transaction.</p>
+  AND worker_id = ? AND attempt = ?;
+
+UPDATE runs SET worker_id = NULL, finished_at = now(),     -- result: failure
+       last_error = ?, next_attempt_at = now() + ?,        -- ? = backoff
+       state = CASE
+         WHEN cancel_requested_at IS NOT NULL OR NOT job_active THEN 'cancelled'
+         WHEN attempt &gt;= max_attempts THEN 'dead'
+         ELSE 'pending' END
+WHERE run_id = ? AND state = 'running'
+  AND worker_id = ? AND attempt = ?;
+
+UPDATE runs SET worker_id = NULL, finished_at = now(),     -- reaper
+       last_error = 'worker lost', next_attempt_at = now() + ?,
+       state = CASE
+         WHEN cancel_requested_at IS NOT NULL OR NOT job_active THEN 'cancelled'
+         WHEN attempt &gt;= max_attempts THEN 'dead'
+         ELSE 'pending' END
+WHERE run_id = ? AND state = 'running' AND attempt = ?
+  AND heartbeat_deadline &lt; now();
+
+UPDATE runs SET state = 'pending', dispatched_at = NULL    -- sweeper
+WHERE run_id = ? AND state = 'dispatched'
+  AND dispatched_at &lt; now() - interval '10 minutes';</code></pre>
+    <p>A claim that matches no rows means another worker already has the run, or it was cancelled: drop the message. A heartbeat that matches no rows means this worker lost the run: stop. A worker that stops for a cancel records it with the failure write, which turns it into <code>cancelled</code>. The reaper ends a lost attempt exactly as a failure would: <code>cancelled</code> if a cancel was requested or the job is no longer active, <code>dead</code> if the attempts are used up, otherwise <code>pending</code> after a backoff, so a run that kills its worker cannot loop for ever. It names the attempt it saw expire, so a heartbeat that lands first makes the reset match nothing. If a slow worker’s visibility timeout passed and another worker reclaimed the run, the slow worker’s late write affects zero rows and cannot corrupt the newer attempt. When a one-off job’s run reaches a final state, the same transaction sets the job to <code>completed</code>. <code>RETURNING</code> is Postgres syntax; in MySQL, read the row back in the same transaction.</p>
     <figure>
       <div class="ctl"><button id="rplay">Play</button><button id="rstep">Next step</button><button id="rall">Show all</button></div>
-      <div class="scroll"><svg id="race" class="race" viewBox="0 0 720 410" style="min-width:600px" role="img" aria-label="Timeline: worker A claims attempt 3 and heartbeats, then freezes; the reaper resets the expired attempt 3; worker B claims attempt 4; A wakes and its result with attempt 3 matches no rows; B's result with attempt 4 succeeds.">
+      <div class="scroll"><svg id="race" class="race" viewBox="0 0 720 410" style="min-width:600px" role="img" aria-label="Timeline: worker A claims attempt 3 and heartbeats, then freezes; the reaper resets attempt 3 once its deadline passes; worker B claims attempt 4; A wakes and its result with attempt 3 matches no rows; B's result with attempt 4 succeeds.">
         <g class="k-work"><rect class="box" x="20" y="10" width="120" height="34" rx="8"/><text class="t" x="80" y="27" text-anchor="middle" dominant-baseline="central">Worker A</text>
         <rect class="box" x="580" y="10" width="120" height="34" rx="8"/><text class="t" x="640" y="27" text-anchor="middle" dominant-baseline="central">Worker B</text></g>
         <g class="k-store"><rect class="box" x="230" y="10" width="120" height="34" rx="8"/><text class="t" x="290" y="27" text-anchor="middle" dominant-baseline="central">runs row</text></g>
@@ -892,7 +1125,7 @@ WHERE run_id = ? AND state = 'running'
         <path d="M80 44V400M290 44V400M480 44V400M640 44V400" stroke="var(--line)" stroke-width="1.2" stroke-dasharray="4 4"/>
         <g data-s="1"><path class="wire" marker-end="url(#ah)" d="M80 84H288"/><text class="s" x="185" y="76" text-anchor="middle">claim → attempt 3 ✓</text></g>
         <g data-s="2"><path class="wire" marker-end="url(#ah)" d="M80 130H288"/><text class="s" x="185" y="122" text-anchor="middle">heartbeat, attempt 3 ✓</text></g>
-        <g data-s="3"><rect x="72" y="150" width="16" height="132" rx="4" fill="color-mix(in srgb,var(--due) 55%,var(--surface))" stroke="var(--queue)"/><text class="s" x="96" y="210">frozen</text><text class="s" x="96" y="224">lease expires</text></g>
+        <g data-s="3"><rect x="72" y="150" width="16" height="132" rx="4" fill="color-mix(in srgb,var(--due) 55%,var(--surface))" stroke="var(--queue)"/><text class="s" x="96" y="210">frozen</text><text class="s" x="96" y="224">deadline passes</text></g>
         <g data-s="4"><path class="wire" marker-end="url(#ah)" d="M480 200H292"/><text class="s" x="385" y="192" text-anchor="middle">reset attempt 3 ✓</text><text class="s" x="298" y="216">pending</text></g>
         <g data-s="5"><path class="wire" marker-end="url(#ah)" d="M640 250H292"/><text class="s" x="560" y="242" text-anchor="middle">claim → attempt 4 ✓</text></g>
         <g data-s="6"><path marker-end="url(#ahb)" d="M80 300H288" stroke="var(--bad)" stroke-width="1.3" fill="none"/><text class="s" x="185" y="292" text-anchor="middle">result, attempt 3</text>
@@ -903,34 +1136,11 @@ WHERE run_id = ? AND state = 'running'
     </figure>
     <h3>Container jobs</h3>
     <ul>
-      <li><strong>Long runs.</strong> A container task can run for many minutes, so set the visibility timeout from the heartbeat interval (for example three missed heartbeats), not from the job’s timeout. Otherwise a dead executor holds the run until the full timeout passes.</li>
+      <li><strong>Long runs.</strong> A container task can run for many minutes, so set the visibility timeout (<code>heartbeat_deadline</code>) from the heartbeat interval (for example three missed heartbeats), not from the job’s timeout. Otherwise a dead executor holds the run until the full timeout passes.</li>
       <li><strong>Identity.</strong> Pass the run id, attempt and scheduled time as environment variables (<code>RUN_ID</code>, <code>ATTEMPT</code>, <code>SCHEDULED_AT</code>), the container’s equivalent of the idempotency headers.</li>
       <li><strong>Cancel stops the task.</strong> An HTTP call already in flight cannot be recalled, but a container can. When a running run is cancelled, the executor sees <code>cancel_requested_at</code> on its next heartbeat and stops the container.</li>
       <li><strong>Capacity.</strong> Concurrency is bounded by cluster CPU and memory, so per-tenant quotas are in resources, not just in runs.</li>
     </ul>
-  </div>
-  <h3>The crash window between database and queue</h3>
-  <p>Firing a run touches two systems: the database (mark <code>dispatched</code>) and the queue (publish). No transaction spans both, so a crash between them forces a choice:</p>
-  <div class="scroll"><table>
-    <tr><th>Order</th><th>Crash between the steps</th><th>Result</th></tr>
-    <tr><td>Mark, then publish</td><td>Run marked dispatched, never queued</td><td>Silently lost</td></tr>
-    <tr><td>Publish, then mark</td><td>Run queued, still pending in the database</td><td>Dispatched twice</td></tr>
-  </table></div>
-  <p>Prefer the duplicate: workers are idempotent anyway (see <a href="#correctness">correctness</a>).</p>
-  <div data-l="2">
-    <p>This design avoids the choice with an outbox:</p>
-    <div class="brief"><b>Brief: transactional outbox.</b> Write the state change <em>and</em> an “outbox” row in one database transaction. A separate relay process reads outbox rows and publishes them to the queue, deleting each after it is acknowledged. The database commit becomes the only decision point, so nothing can be lost; the relay may publish twice, which idempotency absorbs.</div>
-    <figure><div class="flow">
-      <div class="nd k-sched"><b>Scheduler</b><small>fires the run</small></div><span class="ar" aria-hidden="true">→</span>
-      <div class="tx"><small>one database transaction</small>
-        <div class="nd k-store"><b>runs</b><small>state = dispatched</small></div>
-        <div class="nd k-store"><b>outbox</b><small>new event row</small></div></div><span class="ar" aria-hidden="true">→</span>
-      <div class="nd k-api"><b>Relay</b><small>reads, publishes, deletes</small></div><span class="ar" aria-hidden="true">→</span>
-      <div class="nd k-queue"><b>Queue</b><small>may see it twice</small></div><span class="ar" aria-hidden="true">→</span>
-      <div class="nd k-work"><b>Worker</b><small>idempotent</small></div>
-    </div>
-    <figcaption>The state change and the outbox row commit together or not at all. A crash anywhere after the commit only delays publishing, because the outbox row is still there for the relay to pick up.</figcaption></figure>
-    <p>Also run a <strong>sweeper</strong> that finds runs stuck in <code>dispatched</code> with no worker acknowledgement after a timeout and resets them to <code>pending</code>. It catches whatever slips through every other mechanism.</p>
   </div>
 </section>
 
@@ -948,27 +1158,28 @@ WHERE run_id = ? AND state = 'running'
     <p data-l="3">Also send the scheduled time and the attempt number (<code>X-Scheduled-At</code> and <code>X-Attempt</code> headers, or <code>SCHEDULED_AT</code> and <code>ATTEMPT</code> variables), so the receiver knows which scheduled run this is and whether it is a retry.</p>
     <h3>Retries</h3>
     <p>Retry failures with <strong>exponential backoff and jitter</strong>:</p>
-    <div class="formula">delay = random(0, min(cap, base × 2<sup>attempt − 1</sup>))</div>
-    <div class="brief"><b>Brief: jitter.</b> Random spread added to retry delays. Without it, every run that failed together at 09:00:00 retries together at 09:00:02, 09:00:04 and so on: synchronized waves that hit an already struggling endpoint at once.</div>
+    <div class="formula">delay = random(0, min(cap, base × 2<sup>n − 1</sup>)), where n = attempt − attempts_before_retry</div>
+    <p><code>n</code> counts attempts since the last manual retry, so a retried run starts again from the base delay instead of at the cap.</p>
+    <div class="brief"><b>Brief: jitter.</b> Random spread added to retry delays. Without it, every run that failed together at 09:00:00 retries together at 09:00:02, 09:00:06 and so on: synchronized waves that hit an already struggling endpoint at once.</div>
     <p data-l="3">For HTTP jobs, respect what the endpoint tells you: honour <code>Retry-After</code> on 429 and 503 responses. Decide which failures are worth retrying. Timeouts, connection errors and 5xx usually are; a 400 or 404 usually is not, and retrying it only wastes attempts.</p>
     <h3>The dead-letter queue (DLQ)</h3>
-    <p>After <code>max_attempts</code>, a run moves to <code>dead</code>. The DLQ is simply the dead runs of a tenant, kept for a fixed window (for example 14 days) so people can inspect and retry them. A manual retry resets the <em>same</em> run (same id, so the same idempotency key) rather than creating a new one.</p>
+    <p>After <code>max_attempts</code>, a run moves to <code>dead</code>. The DLQ is simply the dead runs of a tenant, kept for a fixed window (for example 14 days) so people can inspect and retry them; after the window, retry answers <code>409</code>, and the row goes when its daily table partition is dropped at 30 days. A manual retry resets the <em>same</em> run (same id, so the same idempotency key) rather than creating a new one.</p>
   </div>
   <div data-l="3">
     <h3>Poison jobs</h3>
-    <p>A poison job is one whose runs crash the worker itself (say, a huge response causing an out-of-memory kill). Such a run returns via the reaper and crashes the next worker too. Apply backoff to reaped runs as well, and count crashes against <code>max_attempts</code>, so one bad job cannot take down the fleet.</p>
+    <p>A poison job is one whose runs crash the worker itself (say, a huge response causing an out-of-memory kill). Such a run returns via the reaper and crashes the next worker too. The reaper therefore applies backoff to reaped runs and counts each crash against <code>max_attempts</code>, moving the run to <code>dead</code> when they are used up (<a href="#dispatch">dispatch queue and workers</a>), so one bad job cannot take down the fleet.</p>
   </div>
 </section>
 
 <section id="load" class="k-queue" data-toc="Behaviour under load" data-nodes="sched queue work"
   data-more2="misfire policies, priority at the source, fairness between tenants and what to measure"
-  data-more3="what happens without a misfire policy, starvation and aging, and failover during a peak">
+  data-more3="what happens without a misfire policy, starvation and aging, and a scheduler node failing at the peak">
   <div class="sh"><h2>Behaviour under load</h2></div>
-  <p class="lede">A scheduler is judged by its peaks, not its average. People write <code>0 9 * * *</code>, not <code>17 9 * * *</code>, so at 09:00:00 the every-minute, hourly and daily jobs all land in the same second.</p>
-  <p>A platform averaging 40 runs per second can face 30,000 in that one second. Most real-world failures of schedulers are failures of peak behaviour, so design for these cases explicitly.</p>
+  <p class="lede">A scheduler is judged by its peaks, not its average. People write <code>0 9 * * *</code>, not <code>17 9 * * *</code>, so at 09:00:00 the runs of the every-minute, hourly and daily jobs all fall due in the same second.</p>
+  <p>A platform averaging 40 runs per second can face 30,000 in that one second. Most real-world failures of schedulers are failures of peak behaviour, so design for these cases explicitly. Three per-job and per-tenant rules decide who waits: a misfire policy for runs missed in an outage, priority applied where runs are dispatched and claimed, and caps that keep one tenant from taking the whole peak.</p>
   <div data-l="2">
     <h3>Missed runs: choose a misfire policy</h3>
-    <p>If the system was down at 03:00, what happens on recovery? Make it a per-job setting:</p>
+    <p>If the system was down at 03:00, what happens on recovery? Make it a per-job setting, applied by the scheduler when it dispatches an overdue run (<a href="#job-store">job store</a>):</p>
     <div class="scroll"><table>
       <tr><th>Policy</th><th>Behaviour</th><th>Good for</th></tr>
       <tr><td>Coalesce (default)</td><td>Run once now, skip the rest</td><td>Digests, reports, syncs</td></tr>
@@ -994,46 +1205,51 @@ WHERE run_id = ? AND state = 'running'
     </svg></div>
     <figcaption>Time runs left to right; each dot is one run and dashed circles are runs missed during the outage. The three policies differ only in what happens at recovery: one run, all four at once, or none.</figcaption></figure>
     <h3>Priority at the source, not only at the queue</h3>
-    <p>Ordering the queue by priority only helps among runs that already exist. If the scheduler creates runs purely by time, a critical run in the last batch before the peak still waits behind all the batches before it. Apply priority when runs are created and claimed, and pre-create large crons further ahead so the peak is ready before it starts.</p>
+    <p>Ordering the queue by priority only helps among runs that have already reached it. At the peak the scheduler is the first queue: 30,000 runs fall due in one second, and if it dispatched them in arrival order, a critical run at the back of the batch would wait behind all the rest. So priority applies at each step: within a tick the scheduler writes its dispatch batches in priority order, the relay publishes high-priority outbox rows first, each priority has its own queue, and workers claim from the higher queues first. The runs for 09:00 already exist as pending rows long before the peak, because each was created when its predecessor was dispatched.</p>
     <p data-l="3">Strict priority starves low-priority work under sustained load. Use weighted claiming (for example 70/20/10 of capacity) or <strong>aging</strong>, which promotes a run once it passes its lag target.</p>
     <h3>Fairness between tenants</h3>
-    <p>If the ten largest tenants own 40% of all jobs, they own 40% of the 09:00 burst too. Use per-tenant queues or weighted fair claiming, plus concurrency caps per tenant and per destination endpoint, so the scheduler cannot overwhelm the endpoints it is calling. The caps are per-tenant quotas with defaults, raised on request: a tenant with one very chatty job can be allowed more than the default, and fair claiming makes that tenant wait for its own extra work instead of everyone else.</p>
+    <p>If the ten largest tenants own 40% of all jobs, they own 40% of the 09:00 burst too. Use per-tenant queues or weighted fair claiming, plus concurrency caps per tenant and per destination endpoint, so the scheduler cannot overwhelm the endpoints it is calling.</p>
+    <p><strong>Quotas.</strong> Each tenant’s caps live in its <code>tenants</code> row: <code>max_concurrent_runs</code>, <code>per_endpoint_limit</code> and <code>rate_limit</code>. Defaults come from the <a href="#estimates">capacity estimates</a> (300 concurrent attempts, 50 concurrent calls per endpoint) and are raised per tenant on request, the way cloud service limits are, with <code>updated_at</code> recording when. The cap is enforced at the claim: before claiming, a worker takes a slot from the tenant’s counter (a counter row or a Redis semaphore), and gives it back with the result; slots expire with the attempt’s visibility timeout, so a dead worker does not leak them. With no slot free, the worker leaves the run <code>dispatched</code> and the queue redelivers it after a short delay. A tenant with one very chatty job can be allowed more than the default, and fair claiming makes that tenant wait for its own extra work instead of everyone else.</p>
     <div class="brief"><b>Brief: thundering herd.</b> Many clients acting at the same instant (all retrying, all reconnecting, all reloading) and overwhelming a shared resource. Jitter, rate limits and staggered work are the standard defences.</div>
   </div>
   <div data-l="3">
-    <h3>Failover during a peak</h3>
-    <p>If workers pre-claim runs before they are due, a worker that dies holding them delays every one of them by its lease length. Keep pre-claiming small and close to the due time, and don’t pre-claim critical runs at all.</p>
+    <h3>A scheduler node failing at the peak</h3>
+    <p>Suppose one of 20 scheduler nodes dies at 08:59:59, holding a twentieth of the partitions and about 1,500 of the 30,000 runs due at 09:00:00 in its buffer. Nothing in memory is handed over. Its leases expire after the TTL (say 20 s); other nodes notice at their next claim attempt, a few seconds later, and claim them with higher epochs; each new owner polls, reloads and finds every one of those runs overdue. The affected runs are late by the TTL plus up to one claim interval plus one poll, about 25 s here, so the TTL alone is not the worst case. The new owners fire the overdue runs in priority order. Those 1,500 runs miss the lag target of their priority, which is the bounded delay NFR2 allows for the runs of a failed node; the other 28,500 keep their target. To shrink the window, lower the TTL (at the cost of more false expiries), and have a node that shuts down cleanly release its leases at once.</p>
   </div>
   <div data-l="2">
     <h3>What to measure</h3>
     <ul>
-      <li><strong>Scheduling lag</strong> (actual dispatch minus intended time), as p50/p99 per priority. This is the single best health signal.</li>
+      <li><strong>Scheduling lag</strong> (actual start minus intended time: <code>started_at − scheduled_at</code>), as p50/p99 per priority. This is the single best health signal.</li>
+      <li>Dispatch lag (<code>dispatched_at − scheduled_at</code>), which tells a slow scheduler from a slow queue or too few workers.</li>
+      <li>Age of the oldest outbox row: a stopped relay shows here first.</li>
       <li>Pending backlog per partition and per tenant.</li>
       <li>Lease churn: claims and expirations per minute. A spike means nodes are flapping.</li>
-      <li>Retry rate, DLQ inflow and reaper resets.</li>
+      <li>Retry rate, DLQ inflow, reaper resets, sweeper resets, and series repairs (which should be zero).</li>
+      <li>Replication lag per shard: it is the size of the loss window a database failover would cause right now.</li>
       <li>Duplicate deliveries, measured on the receiving side via repeated idempotency keys.</li>
     </ul>
   </div>
 </section>
 
 <section id="simple-design" class="k-store" data-toc="Design at lower scale" data-group="Wrap-up" data-nodes="store work"
-  data-more2="how SKIP LOCKED works, the claim transaction and what this design costs">
+  data-more2="how SKIP LOCKED works, the claim transaction and what this design costs"
+  data-more3="a MySQL isolation trap">
   <div class="sh"><h2>Design at lower scale: let the database coordinate</h2></div>
-  <p class="lede">Below a few thousand dispatches per second, you can drop partitions, partition leases and even the message broker. The database’s row locks do all the coordination.</p>
+  <p class="lede">Below about 2,000 runs per second, you can drop partitions, partition leases and even the message broker. The database’s row locks do all the coordination.</p>
   <div data-l="2">
     <div class="brief"><b>Brief: <code>FOR UPDATE SKIP LOCKED</code>.</b> <code>FOR UPDATE</code> locks the rows a query returns until the transaction ends. <code>SKIP LOCKED</code> makes the query pass over rows another transaction already holds instead of waiting for them. Several workers running the same query at the same moment therefore get disjoint sets of rows. Postgres and MySQL 8 both support it.</div>
     <p>Every worker runs the same short transaction:</p>
-<pre><code>SELECT id FROM runs
-WHERE state = 'pending' AND next_run_at &lt;= now()
-ORDER BY priority, next_run_at
+<pre><code>SELECT run_id FROM runs
+WHERE state = 'pending' AND next_attempt_at &lt;= now()
+ORDER BY priority, next_attempt_at       -- priority is a rank: critical 0 … low 3
 LIMIT 100
 FOR UPDATE SKIP LOCKED;
 
 UPDATE runs SET state = 'running', worker_id = ?, attempt = attempt + 1,
-       lease_expires_at = now() + interval '5 minutes'
-WHERE id IN (...);
+       started_at = now(), heartbeat_deadline = now() + interval '5 minutes'
+WHERE run_id IN (...);
 COMMIT;  -- before doing any work</code></pre>
-    <p>Commit before calling anything, so row locks last milliseconds. A reaper resets rows whose <code>lease_expires_at</code> has passed. Results are fenced on <code>attempt</code> exactly as in <a href="#dispatch">dispatch queue and workers</a>. Because state and queue are the same rows, the crash window between database and queue from component 4 does not exist here.</p>
+    <p>Commit before calling anything, so row locks last milliseconds. A reaper handles rows whose <code>heartbeat_deadline</code> has passed, as in <a href="#dispatch">dispatch queue and workers</a>. Results are fenced on <code>attempt</code> exactly as in <a href="#dispatch">dispatch queue and workers</a>. Because state and queue are the same rows, the crash window between database and queue from component 4 does not exist here.</p>
   </div>
   <figure><div class="rows">
     <div class="a">r_101<i style="font-style:normal">09:00:00</i><span>locked by worker A</span></div>
@@ -1046,7 +1262,11 @@ COMMIT;  -- before doing any work</code></pre>
   </div>
   <figcaption>Both workers ask for the three earliest pending runs. Worker B does not wait for A’s locks to clear; it passes over those rows and takes the next three.</figcaption></figure>
   <div data-l="2">
-    <p>The price is that every claim is a query against the same database, so it reaches its limit earlier than a design with a separate queue and needs sharding at a lower volume. One MySQL-specific trap is <strong>gap locking</strong>: at the default <code>REPEATABLE READ</code> level, a claim query that finds nothing still locks the empty index range and stalls inserts into it. Running claims at <code>READ COMMITTED</code> avoids this.</p>
+    <p>The price is that every claim is a query against the same database, so it reaches its limit earlier than a design with a separate queue and needs sharding at a lower volume: at three writes per run (create, claim, result), one primary handles about 2,000 to 3,000 runs per second.</p>
+  </div>
+  <div data-l="3">
+    <h3>A MySQL isolation trap</h3>
+    <p>One MySQL-specific trap is <strong>gap locking</strong>: at the default <code>REPEATABLE READ</code> level, a claim query that finds nothing still locks the empty index range and stalls inserts into it. Running claims at <code>READ COMMITTED</code> avoids this.</p>
   </div>
 </section>
 
@@ -1054,7 +1274,7 @@ COMMIT;  -- before doing any work</code></pre>
   <div class="sh"><h2>References</h2></div>
   <ul>
     <li>Martin Kleppmann, <a href="https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html" target="_blank" rel="noopener">How to do distributed locking</a>: the origin of fencing tokens.</li>
-    <li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em>, chapters 6, 8 and 9: partitioning, leases, consistency.</li>
+    <li>Martin Kleppmann, <em>Designing Data-Intensive Applications</em>: the chapters on partitioning (sharding), the trouble with distributed systems, and consistency and consensus.</li>
     <li>Google, <a href="https://sre.google/sre-book/part-III-practices" target="_blank" rel="noopener">Site Reliability Engineering, Part III</a>: the distributed consensus and distributed cron chapters.</li>
     <li>Dropbox, <a href="https://dropbox.tech/infrastructure/asynchronous-task-scheduling-at-dropbox" target="_blank" rel="noopener">How we designed Dropbox’s ATF</a>: a production async task framework.</li>
     <li><a href="https://hackernoon.com/building-distributed-leases-with-consensus-heartbeats-and-fencing-tokens" target="_blank" rel="noopener">Building distributed leases with consensus, heartbeats and fencing tokens</a>: the lease lifecycle with code.</li>
@@ -1198,13 +1418,13 @@ addEventListener('resize',spy);
     ['Idempotent',/\bidempoten(t|cy)\b/i,'An operation is idempotent if doing it twice has the same effect as doing it once.'],
     ['Fencing token',/fencing tokens?|\bfenc(ing|ed)\b/i,'Increasing number attached to writes so storage can reject writes from stale owners.'],
     ['Misfire policy',/misfire polic(y|ies)/i,'What to do with runs whose time passed while the system was down.'],
-    ['Scheduling lag',/scheduling lag/i,'Actual dispatch time minus intended time; the key health metric.'],
+    ['Scheduling lag',/scheduling lag/i,'Time a worker starts the run (its claim) minus the intended time; the key health metric.'],
     ['Lookahead window',/\blookahead\b/i,'How far ahead the scheduler loads due runs into memory (for example 30 s).'],
     ['Timing wheel',/timing wheels?/i,'Circular array of time slots for holding many timers with O(1) insert and fire.'],
     ['At-least-once',/at-least-once/i,'Every run executes one or more times; never zero.'],
     ['SKIP LOCKED',/SKIP LOCKED/,'SQL clause that skips rows locked by others, letting many workers claim disjoint rows.',true],
     ['Reaper / sweeper',/\breaper\b|\bsweeper\b/i,'Background process that resets abandoned or stuck runs to pending.'],
-    ['Heartbeat',/\bheartbeats?\b/i,'Periodic “still alive” signal that extends a lease or visibility timeout.'],
+    ['Heartbeat',/\bheartbeats?\b/i,'Periodic “still alive” signal: a node’s renewal of its lease, or a worker’s extension of its visibility timeout.'],
     ['Partition',/\bpartitions?\b/i,'Fixed slice of the job space, owned by one scheduler node at a time.'],
     ['Coalesce',/\bcoalesce\b/i,'After an outage, create one run for the job instead of one per missed slot.'],
     ['Jitter',/\bjitter\b/i,'Random spread added to retry delays so retries don’t synchronize.'],
@@ -1226,10 +1446,10 @@ addEventListener('resize',spy);
     nodes.forEach(node=>{
       const el=node.parentElement;
       if(!el||!el.closest('p,li,td,figcaption,.brief')||el.closest('a,button,pre,h2,h3,svg,.more,.pn,.ctl')) return;
-      const inCode=!!el.closest('code');
+      const inCode=!!el.closest('code'), nt=el.closest('[data-noterm]'), ban=nt?nt.dataset.noterm.split('|'):[];
       while(node){
         let best=null;
-        T.forEach((t,i)=>{ if(used.has(i)||(inCode&&!t[3])) return; const m=t[1].exec(node.nodeValue); if(m&&(!best||m.index<best.m.index)) best={m,i}; });
+        T.forEach((t,i)=>{ if(used.has(i)||(inCode&&!t[3])||ban.includes(t[0])) return; const m=t[1].exec(node.nodeValue); if(m&&(!best||m.index<best.m.index)) best={m,i}; });
         if(!best) break;
         const mid=node.splitText(best.m.index), rest=mid.splitText(best.m[0].length);
         const b=document.createElement('button'); b.type='button'; b.className='term'; b.dataset.t=best.i; b.setAttribute('aria-describedby','tip');
@@ -1282,27 +1502,32 @@ addEventListener('resize',spy);
     ['api','A request is accepted only once','FR2 NFR1'],
     ['api','A one-off job sends','FR1'],
     ['api','inserts the job row and its first pending run','NFR1'],
-    ['api','replaces the job’s pending runs in the same transaction','FR3'],
+    ['api','replaces the job’s next run in the same transaction','FR3'],
     ['api','moves its pending runs to the','FR2'],
     ['api','stops one run that has not finished','FR2'],
     ['api','resets the same dead run to pending','FR4'],
     ['api','derives the tenant from the authenticated caller','FR5'],
     ['job-store','single source of truth: every other component','NFR1'],
     ['job-store','copy the spec, timeout and retry policy','FR3'],
-    ['job-store','A crash can then never break the series','FR1 NFR1'],
+    ['job-store','a crash can delay the series but never break it','FR1 NFR1'],
+    ['job-store','applies its copied','FR1 FR3'],
+    ['job-store','every active cron job has exactly one pending run','FR1 NFR1'],
+    ['job-store','This design uses asynchronous replication','NFR1'],
+    ['job-store','failover refuses to promote a replica that lags','NFR1'],
+    ['job-store','a stale write is never accepted','NFR3'],
     ['scheduler','every run must be covered by exactly one machine','NFR2 NFR3'],
     ['scheduler','Zero rows affected means the run is no longer','NFR3'],
     ['scheduler','One query per partition per second, however many jobs','NFR2'],
     ['scheduler','insert the next run in the same transaction as the update','FR1'],
     ['scheduler','fire late but still fire','NFR1 NFR2'],
-    ['timing-wheel','fire each run at its exact moment','NFR2'],
+    ['timing-wheel','fire each run within one tick of its due time','NFR2'],
     ['timing-wheel','let it fire and fail the conditional update','FR2'],
     ['timing-wheel','A new owner repolls and rebuilds it','NFR1'],
-    ['dispatch','a slow job can never delay scheduling','NFR2'],
+    ['dispatch','a slow run can never delay scheduling','NFR2'],
     ['dispatch','so a bulk backlog cannot hold up urgent work','FR3 NFR5'],
     ['dispatch','heartbeats stop, the deadline passes','NFR1'],
     ['dispatch','cannot corrupt the newer attempt','NFR3'],
-    ['dispatch','Prefer the duplicate','NFR3'],
+    ['dispatch','prefer the duplicate','NFR3'],
     ['dispatch','so nothing can be lost','NFR1'],
     ['dispatch','It catches whatever slips through every other mechanism','NFR1'],
     ['correctness','makes duplicates harmless with','NFR3'],
@@ -1312,9 +1537,10 @@ addEventListener('resize',spy);
     ['correctness','kept for a fixed window (for example 14 days)','FR4'],
     ['load','judged by its peaks','NFR4'],
     ['load','Make it a per-job setting','FR3'],
-    ['load','Apply priority when runs are created and claimed','FR3 NFR4'],
+    ['load','So priority applies at each step','FR3 NFR4'],
+    ['load','The cap is enforced at the claim','NFR5'],
     ['load','Use per-tenant queues or weighted fair claiming','FR5 NFR5'],
-    ['load','Keep pre-claiming small','NFR2'],
+    ['load','so the TTL alone is not the worst case','NFR2'],
     ['load','This is the single best health signal','NFR2'],
     ['load','measured on the receiving side','NFR3'],
     ['simple-design','Commit before calling anything','NFR1 NFR3']
@@ -1357,9 +1583,9 @@ addEventListener('resize',spy);
   const svg=$('#race'); if(!svg) return;
   const steps=$$('g[data-s]',svg), cap=$('#racecap'), base=cap.textContent, n=steps.length, play=$('#rplay');
   const T=['Worker A receives the run from the queue and claims it. The claim matches only a run still in dispatched, and raises attempt from 2 to 3. A remembers 3.',
-    'While it executes the run, A heartbeats every few seconds. Each heartbeat pushes lease_expires_at forward, but only for attempt 3.',
-    'A freezes, for example in a long garbage-collection pause. Its heartbeats stop and lease_expires_at passes.',
-    'The reaper resets the run to pending. Its WHERE clause repeats what it saw: still running, still attempt 3, lease expired. Had A heartbeated a moment earlier, the reset would have matched no rows.',
+    'While it executes the run, A heartbeats every few seconds. Each heartbeat pushes heartbeat_deadline forward, but only for attempt 3.',
+    'A freezes, for example in a long garbage-collection pause. Its heartbeats stop and heartbeat_deadline passes.',
+    'The reaper resets the run to pending. Its WHERE clause repeats what it saw: still running, still attempt 3, deadline passed. Had A heartbeated a moment earlier, the reset would have matched no rows.',
     'The run is dispatched again and worker B claims it, raising attempt to 4.',
     'A wakes up and writes its result with attempt 3. The row is on attempt 4, so the write matches no rows. A learns it lost the run and discards its result.',
     'B finishes and writes succeeded with attempt 4. Only the latest claim can finish the run.'];
