@@ -1,6 +1,7 @@
 """Keep only findings whose quote appears verbatim in the page's visible text.
 
-Reader-facing attributes (depth descriptions, labels, titles) count as visible.
+Reader-facing attributes (depth descriptions, labels, titles, the page settings in
+<meta content>) count as visible.
 
 Usage: python3 check_quotes.py SOURCE.html FINDINGS.json > KEPT.json
 FINDINGS.json is {"findings": [...]} as returned by the judge. Dropped findings
@@ -14,7 +15,7 @@ from html import unescape
 from html.parser import HTMLParser
 
 
-SHOWN_ATTRS = ("data-more2", "data-more3", "aria-label", "title", "alt")
+SHOWN_ATTRS = ("data-more2", "data-more3", "aria-label", "title", "alt", "content")
 
 
 class Text(HTMLParser):

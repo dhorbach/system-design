@@ -1,0 +1,26 @@
+/* Tokens and reset shared by every page. Loaded by templates/page.html. */
+:root{
+  --bg:#EFF3F7; --surface:#FFFFFF; --sunken:#E4EAF1; --ink:#131C2E; --muted:#566178; --line:#D3DBE6;
+  /* hues: a page gives each of its components one of these (see .k-* in the page's own style) */
+  --teal:#0A7C77; --indigo:#4250C4; --amber:#A86400; --rose:#B93A56; --violet:#8A3FB0; --green:#3B7D2E; --slate:#566178;
+  --accent:var(--teal); --mark:#F2B33D; --bad:#C23B3B;
+  --head:"Bricolage Grotesque",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+  --body:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#0D1422; --surface:#151E31; --sunken:#0A101C; --ink:#E6EBF4; --muted:#97A3BB; --line:#27334F;
+    --teal:#3CC4BD; --indigo:#8C97F5; --amber:#F0B040; --rose:#F08099; --violet:#C792EA; --green:#8CCB6E; --slate:#97A3BB; --bad:#F07070;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0D1422; --surface:#151E31; --sunken:#0A101C; --ink:#E6EBF4; --muted:#97A3BB; --line:#27334F;
+  --teal:#3CC4BD; --indigo:#8C97F5; --amber:#F0B040; --rose:#F08099; --violet:#C792EA; --green:#8CCB6E; --slate:#97A3BB; --bad:#F07070;
+}
+*,*::before,*::after{box-sizing:border-box}
+[hidden]{display:none!important}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--body);font-size:1.09rem;line-height:1.68}

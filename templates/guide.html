@@ -1,0 +1,47 @@
+<head>
+<link rel="stylesheet" href="{{asset:assets/guide.css}}">
+<script defer src="{{asset:assets/guide.js}}"></script>
+{{head}}
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1.5 9 5 1 8.5z" fill="var(--muted)"/></marker>
+  <marker id="ahb" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1.5 9 5 1 8.5z" fill="var(--bad)"/></marker>
+</defs></svg>
+
+<header class="bar">
+  <button class="menu" id="menu" aria-expanded="false" aria-controls="side">Contents</button>
+  <a class="brand" href="{{root}}./">System design</a>
+  <span class="crumb" aria-hidden="true">/</span>
+  <a class="title" href="#main" aria-label="Back to top: {{short-title}}">{{short-title}}</a>
+  <div class="seg" id="gseg" role="group" aria-label="Depth for the whole guide">
+    <button data-d="1"><b>1</b><span>Overview</span></button>
+    <button data-d="2"><b>2</b><span>Mechanics</span></button>
+    <button data-d="3"><b>3</b><span>Full detail</span></button>
+  </div>
+  <div class="prog" id="prog"></div>
+</header>
+<div class="scrim" id="scrim"></div>
+
+<div class="shell">
+<nav class="side" id="side" aria-label="Contents">
+  <h2>Where you are in the system</h2>
+  {{map}}
+  <h2>Contents</h2>
+  <ol class="toc" id="toc"></ol>
+</nav>
+
+<main id="main">
+<div class="hero">
+  <h1>{{title}}</h1>
+  <div class="pick" id="pick" role="group" aria-label="Depth for the whole guide">
+    <button data-d="1"><div class="lv"><i class="f"></i><i></i><i></i></div><strong>Overview</strong><span>{{depth-1|The whole system and the one idea behind each part.}}</span><em></em></button>
+    <button data-d="2"><div class="lv"><i class="f"></i><i class="f"></i><i></i></div><strong>Mechanics</strong><span>{{depth-2|How each part works, with every term explained.}}</span><em></em></button>
+    <button data-d="3"><div class="lv"><i class="f"></i><i class="f"></i><i class="f"></i></div><strong>Full detail</strong><span>{{depth-3}}</span><em></em></button>
+  </div>
+</div>
+
+{{body}}
+</main>
+</div>
+</body>

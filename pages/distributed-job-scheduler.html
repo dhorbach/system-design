@@ -1,189 +1,20 @@
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="layout" content="guide">
 <title>Building a distributed job scheduler</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<meta name="short-title" content="Distributed job scheduler">
+<meta name="description" content="Run jobs on time across many machines. Explore the job store, scheduler, dispatch queue, and workers—from the architecture to SQL, edge cases, and a Go implementation.">
+<meta name="depth-3" content="SQL, example rows, edge cases, tuning and a Go implementation.">
 <style>
-:root{
-  --bg:#EFF3F7; --surface:#FFFFFF; --sunken:#E4EAF1; --ink:#131C2E; --muted:#566178; --line:#D3DBE6;
-  --store:#4250C4; --sched:#0A7C77; --queue:#A86400; --work:#B93A56; --api:#566178;
-  --due:#F2B33D; --bad:#C23B3B;
-  --head:"Bricolage Grotesque",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
-  --body:"Source Serif 4",Georgia,"Times New Roman",serif;
-  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
-  --bar:56px;
-  box-sizing:border-box;
-  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
-}
-@media (prefers-color-scheme:dark){
-  :root:not([data-theme="light"]){
-    color-scheme:dark;
-    --bg:#0D1422; --surface:#151E31; --sunken:#0A101C; --ink:#E6EBF4; --muted:#97A3BB; --line:#27334F;
-    --store:#8C97F5; --sched:#3CC4BD; --queue:#F0B040; --work:#F08099; --api:#97A3BB; --bad:#F07070;
-  }
-}
-:root[data-theme="dark"]{
-  color-scheme:dark;
-  --bg:#0D1422; --surface:#151E31; --sunken:#0A101C; --ink:#E6EBF4; --muted:#97A3BB; --line:#27334F;
-  --store:#8C97F5; --sched:#3CC4BD; --queue:#F0B040; --work:#F08099; --api:#97A3BB; --bad:#F07070;
-}
-*,*::before,*::after{box-sizing:inherit}
-[hidden]{display:none!important}
-html{scroll-padding-top:calc(var(--bar) + 20px + env(safe-area-inset-top,0px)); -webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--body);font-size:1.09rem;line-height:1.68}
-body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:30;background:var(--surface)}
-a{color:inherit;text-decoration-color:color-mix(in srgb,var(--ink) 35%,transparent);text-underline-offset:3px}
-a:hover{text-decoration-color:currentColor}
-:focus-visible{outline:2px solid var(--sched);outline-offset:2px;border-radius:4px}
-button{font:inherit;color:inherit;cursor:pointer}
+/* component colours */
+:root{--api:var(--slate);--store:var(--indigo);--sched:var(--teal);--queue:var(--amber);--work:var(--rose)}
 .k-api{--k:var(--api)} .k-store{--k:var(--store)} .k-sched{--k:var(--sched)} .k-queue{--k:var(--queue)} .k-work{--k:var(--work)}
-
-/* top bar */
-.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;height:var(--bar);display:flex;align-items:center;gap:14px;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--line);font-family:var(--head)}
-.bar .title{font-weight:600;font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;text-decoration:none}
-.bar .title:hover{text-decoration:underline}
-.bar .brand,.bar .crumb{display:none}
-.menu{display:none;border:1px solid var(--line);background:none;border-radius:8px;padding:6px 10px;font-size:.9rem}
-.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;padding:3px;background:var(--sunken);gap:2px}
-.seg button{border:0;background:none;border-radius:7px;padding:5px 11px;font-size:.88rem;font-weight:500;color:var(--muted);display:flex;gap:6px;align-items:center}
-.seg button b{font-weight:600;font-variant-numeric:tabular-nums}
-.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 0 0 1px var(--line)}
-.prog{position:absolute;left:0;bottom:-1px;height:2px;background:var(--sched);width:0}
-@media (min-width:901px){
-  /* floating bar, as wide as the page container; --bar is the space it takes: 12px gap + 52px bar + 12px gap */
-  :root{--bar:76px}
-  body::before{height:calc(44px + env(safe-area-inset-top,0px));z-index:19;background:linear-gradient(var(--bg) 45%,transparent);pointer-events:none}
-  .bar{top:calc(12px + env(safe-area-inset-top,0px));height:52px;width:calc(100% - 24px);max-width:1076px;margin:12px auto 0;gap:10px;padding:0 9px 0 19px;border:1px solid var(--line);border-radius:14px;background:color-mix(in srgb,var(--surface) 86%,transparent);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);box-shadow:0 10px 28px -14px rgba(8,14,28,.45);overflow:hidden}
-  .bar .brand{display:block;font-weight:500;font-size:.95rem;color:var(--muted);text-decoration:none;white-space:nowrap}
-  .bar .brand:hover{color:var(--ink)}
-  .bar .crumb{display:block;color:var(--muted);opacity:.5}
-  .bar .title{font-size:.95rem}
-  .prog{bottom:0}
-}
-
-/* shell */
-.shell{display:grid;grid-template-columns:276px minmax(0,1fr);max-width:1076px;margin:0 auto}
-.side{position:sticky;top:calc(var(--bar) + env(safe-area-inset-top,0px));align-self:start;height:calc(100vh - var(--bar));overflow:auto;padding:22px 18px 40px 20px;font-family:var(--head);border-right:1px solid var(--line)}
-.side h2{font-size:.82rem;font-weight:500;color:var(--muted);margin:0 0 8px}
-.minimap{display:block;width:100%;height:auto;margin-bottom:22px}
-.minimap .n{cursor:pointer}
-.minimap .n rect{fill:var(--surface);stroke:var(--line);stroke-width:1;transition:fill .2s,stroke .2s}
-.minimap .n text{font:500 11px var(--head);fill:var(--muted);text-anchor:middle;dominant-baseline:central;pointer-events:none}
-.minimap .n.on rect{fill:color-mix(in srgb,var(--k) 20%,var(--surface));stroke:var(--k);stroke-width:1.5}
-.minimap .n.on text{fill:var(--ink)}
-.minimap .n:hover rect,.minimap .n:focus-visible rect{stroke:var(--k)}
-.wire{stroke:var(--muted);stroke-width:1.2;fill:none}
-.toc{list-style:none;margin:0;padding:0;font-size:.93rem;line-height:1.3}
-.toc>li>a{display:flex;gap:9px;align-items:baseline;padding:6px 8px;border-radius:7px;text-decoration:none;color:var(--muted)}
-.toc>li>a:hover{color:var(--ink);background:var(--sunken)}
-.toc>li>a.cur{color:var(--ink);font-weight:600;background:color-mix(in srgb,var(--k,var(--muted)) 13%,transparent)}
-.toc .chip{flex:none;width:1.35em;height:1.35em;border-radius:50%;font-size:.76em;font-weight:600;display:inline-grid;place-items:center;border:1.5px solid var(--k,var(--line));color:var(--k,var(--muted));position:relative;top:-1px}
-.toc .chip:empty{border-color:transparent}
-.toc .chip:empty::after{content:"";width:5px;height:5px;border-radius:50%;background:var(--line)}
-.toc ol{list-style:none;margin:2px 0 6px 2.05em;padding:0 0 0 10px;border-left:1px solid var(--line);display:none;font-size:.88rem}
-.toc li.open ol{display:block}
-.toc ol a{display:block;padding:3px 6px;border-radius:5px;text-decoration:none;color:var(--muted)}
-.toc ol a:hover,.toc ol a.cur{color:var(--ink)}
-.toc ol a.cur{font-weight:600}
-.scrim{display:none}
-.toc .grp{font-size:.8rem;color:var(--muted);margin:16px 0 4px 8px}
-.toc .grp:first-child{margin-top:0}
-.toc li.sub>a{padding-left:2.5em;font-size:.9rem}
-.toc li.sub .chip{display:none}
-.toc li[data-d="1"] ol{display:none}
-.toc>li>a[data-diff]:not([data-diff=""])::after{content:attr(data-diff);margin-left:auto;font-size:.72rem;font-weight:500;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:1px 5px;white-space:nowrap}
-
-main{padding:36px 40px 120px;min-width:0}
-main>*{max-width:45rem}
-.hero h1{font-family:var(--head);font-weight:700;font-size:clamp(2rem,4.4vw,3.05rem);line-height:1.04;letter-spacing:-.02em;margin:0 0 24px;max-width:16ch}
-.hero p{margin:0 0 22px;color:var(--muted);max-width:38rem}
-.pick{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;font-family:var(--head)}
-.pick button{text-align:left;border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:14px 14px 12px;display:grid;gap:3px;align-content:start}
-.pick button[aria-pressed="true"]{border-color:var(--sched);box-shadow:inset 0 0 0 1px var(--sched);background:color-mix(in srgb,var(--sched) 8%,var(--surface))}
-.pick .lv{display:flex;gap:4px;margin-bottom:6px}
-.pick .lv i{width:16px;height:5px;border-radius:3px;background:var(--line)}
-.pick .lv i.f{background:var(--sched)}
-.pick strong{font-weight:600;font-size:1.02rem}
-.pick span{font-size:.86rem;color:var(--muted);line-height:1.35}
-.pick em{font-style:normal;font-size:.82rem;color:var(--muted);margin-top:4px}
-
-section{padding-top:54px}
-.sh{display:flex;gap:12px;align-items:flex-start;margin-bottom:14px}
-.sh h2{font-family:var(--head);font-weight:700;font-size:1.72rem;line-height:1.15;letter-spacing:-.012em;margin:0;flex:1;display:flex;gap:12px;align-items:baseline}
-.sh .num{flex:none;width:1.5em;height:1.5em;border-radius:50%;background:var(--k);color:var(--surface);font-size:.62em;display:inline-grid;place-items:center;position:relative;top:-3px}
-.sh .seg{margin-top:3px}
-.sh .seg button{padding:3px 9px;font-size:.8rem}
-h3{font-family:var(--head);font-weight:600;font-size:1.18rem;line-height:1.25;margin:32px 0 8px}
-p{margin:0 0 14px}
-.lede{font-size:1.2rem;line-height:1.55}
-ul,ol{margin:0 0 16px;padding-left:1.3em}
-li{margin-bottom:6px}
-code,pre,.formula,.wlog,.rows,.schema,#wclk{font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0}
-code{font-family:var(--mono);font-size:.83em;background:var(--sunken);padding:.1em .35em;border-radius:4px}
-pre{font-family:var(--mono);font-size:.82rem;line-height:1.6;background:var(--sunken);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;margin:0 0 16px}
-pre code{background:none;padding:0;font-size:inherit}
-.scroll{overflow-x:auto;margin:0 0 16px}
-table{border-collapse:collapse;width:100%;font-family:var(--head);font-size:.9rem;line-height:1.4}
-th,td{text-align:left;padding:8px 12px 8px 0;border-bottom:1px solid var(--line);vertical-align:top}
-th{font-weight:600;color:var(--muted);font-size:.84rem;white-space:nowrap}
-td code{white-space:nowrap}
-.brief{border-left:3px solid var(--due);background:color-mix(in srgb,var(--due) 11%,var(--surface));border-radius:0 10px 10px 0;padding:11px 16px;margin:0 0 16px;font-size:1rem;line-height:1.55}
-.brief b:first-child{font-family:var(--head);font-weight:600;margin-right:4px}
-figure{margin:6px 0 18px;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px}
-figure .scroll{margin:0}
-figure svg{display:block;width:100%;height:auto}
-figcaption{font-family:var(--head);font-size:.88rem;color:var(--muted);line-height:1.45;margin-top:12px}
-svg .t{font:600 13px var(--head);fill:var(--ink)} svg .s{font:400 11.5px var(--head);fill:var(--muted)}
-svg .box{fill:color-mix(in srgb,var(--k) 15%,var(--surface));stroke:var(--k);stroke-width:1.3}
-svg a:hover .box,svg a:focus-visible .box{fill:color-mix(in srgb,var(--k) 30%,var(--surface))}
-svg a{cursor:pointer;text-decoration:none}
-
-/* depth filter */
-[data-depth="1"] [data-l="2"],[data-depth="1"] [data-l="3"],[data-depth="2"] [data-l="3"]{display:none}
-.more{margin-top:20px;border:1px dashed var(--line);border-radius:12px;padding:12px 14px;font-family:var(--head);font-size:.9rem;display:flex;gap:12px;align-items:center;flex-wrap:wrap;color:var(--muted)}
-.more span{flex:1;min-width:14rem;line-height:1.4}
-.more button{border:1px solid var(--ink);background:none;border-radius:8px;padding:6px 12px;font-weight:500;font-size:.88rem;white-space:nowrap}
-.more button:hover{background:var(--ink);color:var(--bg)}
-.pn{display:flex;justify-content:space-between;gap:12px;margin-top:22px;font-family:var(--head);font-size:.9rem}
-.pn a{color:var(--muted);text-decoration:none;padding:4px 0}
-.pn a:hover{color:var(--ink);text-decoration:underline}
-
-/* system page */
-.life{list-style:none;padding:0;margin:0 0 18px;display:grid;gap:8px;counter-reset:s}
-.life li{counter-increment:s;display:grid;grid-template-columns:1.6em 6.6em 1fr;gap:10px;align-items:baseline;margin:0;padding:9px 0;border-bottom:1px solid var(--line);font-size:1rem;line-height:1.5}
-.life li::before{content:counter(s);font-family:var(--head);font-weight:600;color:var(--muted)}
-.life b{font-family:var(--head);font-weight:600}
-.ideas{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:16px;font-family:var(--head)}
-.ideas a{display:grid;gap:4px;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--k);border-radius:4px 10px 10px 4px;background:var(--surface);text-decoration:none;line-height:1.35}
-.ideas a:hover{border-color:var(--k)}
-.ideas .c{grid-row:span 2;width:1.5em;height:1.5em;border-radius:50%;border:1.5px solid var(--k);color:var(--k);font-size:.8rem;font-weight:600;display:grid;place-items:center}
-.ideas strong{font-weight:600;font-size:.98rem}
-.ideas span{font-size:.86rem;color:var(--muted)}
-
-/* schema */
-.schema{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;font-family:var(--mono);font-size:.78rem;line-height:1.5}
-.schema div{border:1px solid var(--line);border-radius:10px;overflow:hidden}
-.schema h4{margin:0;padding:7px 12px;font:600 .9rem var(--head);background:var(--sunken);display:flex;justify-content:space-between;gap:8px}
-.schema h4 small{font-weight:400;color:var(--muted);font-size:.8rem}
-.schema ul{list-style:none;margin:0;padding:8px 12px}
-.schema li{margin:0;display:flex;justify-content:space-between;gap:10px}
-.schema li i{font-style:normal;color:var(--muted);font-family:var(--head);font-size:.78rem;white-space:nowrap}
-.schema li i.pk{color:var(--store);font-weight:600}
 
 /* partitions */
 .parts{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;font-family:var(--head)}
 .parts div{border-radius:8px;padding:7px 4px;text-align:center;font-size:.8rem;line-height:1.3;border:1.5px solid var(--n);background:color-mix(in srgb,var(--n) 16%,var(--surface));transition:background .35s,border-color .35s}
 .parts div b{display:block;font-size:.95rem;font-weight:600}
-.parts .moved{box-shadow:0 0 0 2px var(--due)}
+.parts .moved{box-shadow:0 0 0 2px var(--mark)}
 .nA{--n:var(--sched)} .nB{--n:var(--queue)} .nC{--n:var(--store)}
-.ctl{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;font-family:var(--head);font-size:.88rem;color:var(--muted)}
-.ctl button{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 12px;font-weight:500;color:var(--ink)}
-.ctl button:hover{border-color:var(--ink)}
-.key{display:inline-flex;gap:6px;align-items:center}
-.key i{width:11px;height:11px;border-radius:3px;background:var(--n);display:inline-block}
-.key s{text-decoration:line-through}
 
 /* wheel */
 .wheel{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:4px;margin-bottom:12px;font-family:var(--head)}
@@ -191,91 +22,25 @@ svg a{cursor:pointer;text-decoration:none}
 .slot.cur{border:2px solid var(--sched);background:color-mix(in srgb,var(--sched) 9%,transparent)}
 .slot .hd{font-size:.72rem;color:var(--muted)}
 .jc{font-size:.7rem;padding:2px 3px;border-radius:4px;width:100%;text-align:center;white-space:nowrap}
-.jc.rd{background:var(--due);color:#1B1300;font-weight:600}
+.jc.rd{background:var(--mark);color:#1B1300;font-weight:600}
 .jc.wt{border:1px dashed var(--muted);color:var(--muted)}
 .jc.fd{background:color-mix(in srgb,var(--sched) 22%,transparent);color:var(--sched);font-weight:600}
 .jc.gh{border:1.5px dashed var(--queue);color:var(--queue)}
 .slot.tg{border-color:var(--queue);border-style:dashed}
-.race g[data-s]{transition:opacity .3s}
-.race g[data-s].off{opacity:.12}
 .wlog{font-family:var(--mono);font-size:.76rem;line-height:1.7;color:var(--muted);min-height:6.8em}
-.ctl input[type=range]{flex:1;min-width:110px;accent-color:var(--sched)}
 
-/* flows */
-.flow{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;font-family:var(--head);font-size:.86rem;line-height:1.3}
-.flow .nd{border:1.3px solid var(--k);background:color-mix(in srgb,var(--k) 15%,var(--surface));border-radius:9px;padding:9px 12px;display:grid;align-content:center;gap:1px}
-.flow .nd b{font-weight:600}
-.flow .nd small{color:var(--muted);font-size:.78rem}
-.flow .tx{border:1.5px dashed var(--store);border-radius:12px;padding:8px;display:grid;gap:6px}
-.flow .tx>small{color:var(--store);font-weight:600;font-size:.78rem}
-.flow .ar{align-self:center;color:var(--muted);font-size:1.1rem}
+/* rows claimed with SKIP LOCKED */
 .rows{font-family:var(--mono);font-size:.8rem;display:grid;gap:4px}
 .rows div{display:grid;grid-template-columns:5em 5.5em 1fr;gap:10px;padding:6px 10px;border-radius:7px;border:1px solid var(--line);align-items:center}
 .rows span{font-family:var(--head);font-size:.82rem}
 .rows .a{border-color:var(--sched);background:color-mix(in srgb,var(--sched) 14%,var(--surface))}
 .rows .b{border-color:var(--work);background:color-mix(in srgb,var(--work) 14%,var(--surface))}
-.cite{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 16px;font-family:var(--head);font-size:.95rem;line-height:1.5;overflow-wrap:anywhere}
-pre .tw{color:var(--store);font-weight:600}
-pre .ts{color:var(--sched)}
-pre .tk{color:var(--work)}
-pre .tn{color:var(--queue)}
-pre .tc{color:var(--muted);font-style:italic}
-.formula{font-family:var(--mono);font-size:.88rem;background:var(--sunken);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 0 16px;overflow-x:auto;white-space:nowrap}
-.rid{font-family:var(--head);font-size:.72em;font-weight:600;border:1.5px solid var(--ink);border-radius:5px;padding:1px 6px;margin-right:9px;white-space:nowrap;vertical-align:.1em}
-.req{font-family:var(--head);font-size:.68em;font-weight:600;font-style:normal;text-decoration:none;border:1px solid var(--line);background:var(--surface);color:var(--muted);border-radius:5px;padding:1px 5px;margin-left:5px;white-space:nowrap;vertical-align:.14em}
-.req:hover{border-color:var(--ink);color:var(--ink)}
-#requirements>ul{list-style:none;padding-left:0}
-#requirements>ul>li{padding:3px 6px;margin-left:-6px;border-radius:7px;transition:background .5s}
-#requirements>ul>li.rflash{background:color-mix(in srgb,var(--due) 32%,transparent)}
-.term{display:inline;font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;text-align:inherit;white-space:normal;cursor:help;text-decoration:underline dotted var(--sched);text-decoration-thickness:1.5px;text-underline-offset:3px}
-.term:hover,.term:focus-visible{text-decoration-style:solid}
-#tip{position:fixed;z-index:40;max-width:min(320px,calc(100vw - 20px));background:var(--ink);color:var(--bg);font-family:var(--head);font-size:.86rem;line-height:1.4;padding:9px 12px;border-radius:9px;pointer-events:none;box-shadow:0 6px 24px rgba(8,14,28,.25)}
-#tip b{display:block;font-weight:600;margin-bottom:2px}
-
-@media (max-width:900px){
-  .shell{display:block}
-  .menu{display:block}
-  .side{position:fixed;z-index:25;top:calc(var(--bar) + env(safe-area-inset-top,0px));left:0;bottom:0;height:auto;width:min(300px,86vw);background:var(--surface);transform:translateX(-102%);transition:transform .22s}
-  .side.open{transform:none;box-shadow:8px 0 30px rgba(8,14,28,.25)}
-  .scrim.open{display:block;position:fixed;inset:0;z-index:22;background:rgba(8,14,28,.4)}
-  main{padding:26px 18px 90px}
-  .bar{padding:0 12px;gap:10px}
-  .bar .seg button span{display:none}
-  .pick{grid-template-columns:1fr}
-  .ideas,.schema{grid-template-columns:1fr}
-  .wheel{grid-template-columns:repeat(6,minmax(0,1fr))}
-  .life li{grid-template-columns:1.4em 1fr}
-  .life li b{grid-column:2}
-  .life li span{grid-column:2}
-  .sh{flex-wrap:wrap}
-  .sh h2{font-size:1.45rem;flex-basis:100%}
-}
-@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+.wlog,.rows,#wclk{font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0}
+@media (max-width:900px){.wheel{grid-template-columns:repeat(6,minmax(0,1fr))}}
 </style>
 </head>
 <body>
-<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
-  <marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1.5 9 5 1 8.5z" fill="var(--muted)"/></marker>
-  <marker id="ahb" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1.5 9 5 1 8.5z" fill="var(--bad)"/></marker>
-</defs></svg>
-
-<header class="bar">
-  <button class="menu" id="menu" aria-expanded="false" aria-controls="side">Contents</button>
-  <a class="brand" href="./">System design</a>
-  <span class="crumb" aria-hidden="true">/</span>
-  <a class="title" href="#main" aria-label="Back to top: Distributed job scheduler">Distributed job scheduler</a>
-  <div class="seg" id="gseg" role="group" aria-label="Depth for the whole guide">
-    <button data-d="1"><b>1</b><span>Overview</span></button>
-    <button data-d="2"><b>2</b><span>Mechanics</span></button>
-    <button data-d="3"><b>3</b><span>Full detail</span></button>
-  </div>
-  <div class="prog" id="prog"></div>
-</header>
-<div class="scrim" id="scrim"></div>
-
-<div class="shell">
-<nav class="side" id="side" aria-label="Contents">
-  <h2>Where you are in the system</h2>
+<template data-slot="map">
   <svg class="minimap" viewBox="0 0 224 150" role="group" aria-label="System map. Select a component to jump to its part of the guide.">
     <path class="wire" marker-end="url(#ah)" d="M102 17H121"/>
     <path class="wire" marker-end="url(#ah)" d="M172 32V59"/>
@@ -288,19 +53,7 @@ pre .tc{color:var(--muted);font-style:italic}
     <g class="n k-sched" data-node="sched" data-go="scheduler" tabindex="0" role="link" aria-label="Scheduler"><rect x="122" y="60" width="100" height="30" rx="7"/><text x="172" y="75">Scheduler</text></g>
     <g class="n k-queue" data-node="queue" data-go="dispatch" tabindex="0" role="link" aria-label="Dispatch queue"><rect x="2" y="118" width="100" height="30" rx="7"/><text x="52" y="133">Queue</text></g>
   </svg>
-  <h2>Contents</h2>
-  <ol class="toc" id="toc"></ol>
-</nav>
-
-<main id="main">
-<div class="hero">
-  <h1>Building a distributed job scheduler</h1>
-  <div class="pick" id="pick" role="group" aria-label="Depth for the whole guide">
-    <button data-d="1"><div class="lv"><i class="f"></i><i></i><i></i></div><strong>Overview</strong><span>The whole system and the one idea behind each part.</span><em></em></button>
-    <button data-d="2"><div class="lv"><i class="f"></i><i class="f"></i><i></i></div><strong>Mechanics</strong><span>How each part works, with every term explained.</span><em></em></button>
-    <button data-d="3"><div class="lv"><i class="f"></i><i class="f"></i><i class="f"></i></div><strong>Full detail</strong><span>SQL, example rows, edge cases, tuning and a Go implementation.</span><em></em></button>
-  </div>
-</div>
+</template>
 
 <section id="overview" data-toc="Problem" data-group="Framing" data-nodes="">
   <div class="sh"><h2>Problem</h2></div>
@@ -341,7 +94,7 @@ pre .tc{color:var(--muted);font-style:italic}
   <div class="sh"><h2>Requirements</h2></div>
   <p>Each ID reappears as a tag wherever the design implements that requirement.</p>
   <h3>Functional requirements</h3>
-  <ul>
+  <ul data-reqs="FR">
     <li><strong>One-off and recurring jobs.</strong><span data-l="2"> Run a job once at a chosen time, or repeatedly on a cron schedule evaluated in the job’s own time zone. A job’s kind can be HTTP or container, and new kinds can be added later.</span><span data-l="3"> Crashes and restarts never lose or duplicate a scheduled run; runs missed during an outage are handled as the job’s misfire policy says (<a href="#job-store">job store</a>, <a href="#load">behaviour under load</a>).</span></li>
     <li><strong>Create, cancel and query.</strong><span data-l="2"> Clients manage jobs through an API and can see the state of every run.</span><span data-l="3"> Cancelling a job stops it from scheduling more runs. Runs already handed to workers are cancelled one by one, and a cancelled run that has not started never starts. Cancelling one run of a cron job leaves the rest of its series running (<a href="#api">API service</a>, <a href="#dispatch">dispatch queue and workers</a>).</span></li>
     <li><strong>Per-job policies.</strong><span data-l="2"> Each job carries its own priority, retry limit, timeout and misfire policy.</span><span data-l="3"> An edit applies to every run that has not started yet; a run already dispatched or running keeps the settings it started with, and an edit never makes a run fire twice (<a href="#api">API service</a>, <a href="#job-store">job store</a>).</span></li>
@@ -349,7 +102,7 @@ pre .tc{color:var(--muted);font-style:italic}
     <li><strong>Many tenants.</strong><span data-l="2"> One platform is shared by many teams or tenants.</span><span data-l="3"> Tenants are isolated: each sees and manages only its own jobs, runs and dead-letter queue, within its own rate limits (<a href="#api">API service</a>, <a href="#load">behaviour under load</a>).</span></li>
   </ul>
   <h3>Non-functional requirements</h3>
-  <ul>
+  <ul data-reqs="NFR">
     <li><strong>Accepted means it will run.</strong><span data-l="2"> Once the API says “scheduled”, its runs execute even if machines crash. The one exception is a failover of the job store’s database, which can lose writes acknowledged in roughly the last second before it.</span><span data-l="3"> No accepted job is lost when any single machine or component fails, except the job store’s primary: its replicas are updated asynchronously, so a failover can lose API writes (creates, edits, cancels, retries) acknowledged in the last second or so before it. Failover never promotes a replica further behind than that, and recovery needs no manual intervention (<a href="#store-failover">surviving a database failure</a>, <a href="#dispatch">dispatch queue and workers</a>).</span></li>
     <li><strong>Fire on time.</strong><span data-l="2"> Scheduling lag (the time a worker starts the run minus its intended time) stays within a target per priority, even at the peak: p99 under 2 s for critical and high, under 30 s for normal, under 5 minutes for low.</span><span data-l="3"> When a scheduler node crashes, the runs it owned may start late by a bounded amount, the lease TTL plus about one claim interval and one poll (typically 15–40 s); every other node’s runs keep their target (<a href="#scheduler">scheduler</a>, <a href="#load">behaviour under load</a>).</span></li>
     <li><strong>Run at least once, and make duplicates harmless.</strong><span data-l="2"> Crashes cause retries, so the design makes repeats safe.</span><span data-l="3"> Exactly-once execution is not achievable over a network, so the design delivers at-least-once. A run may execute more than once; every attempt carries the same run id, so the receiver can always recognise a repeat, and making a repeat harmless is the receiver’s job. A late result from an old attempt never overwrites a newer one (<a href="#scheduler">scheduler</a>, <a href="#correctness">correctness</a>).</span></li>
@@ -400,7 +153,7 @@ pre .tc{color:var(--muted);font-style:italic}
     <div class="formula">every-minute: 2,000 × 1,440 = 2,880,000 runs/day<br>hourly: 20,000 × 24 = 480,000 runs/day<br>daily: 100,000 × 1 = 100,000 runs/day<br>one-off: 50,000 runs/day<br>total: 3,510,000 runs/day ÷ 86,400 s ≈ 40 runs/s<br>with 2% retried: about 41 attempts/s</div>
     <p>The 2,000 every-minute jobs are under 2% of the definitions but produce over 80% of the runs.</p>
     <h3>The peak</h3>
-    <p>At 09:00:00 every every-minute job, every hourly job and the 09:00 share of the daily jobs are due in the same second:</p>
+    <p data-req="NFR4">At 09:00:00 every every-minute job, every hourly job and the 09:00 share of the daily jobs are due in the same second:</p>
     <div class="formula">2,000 + 20,000 + (8% × 100,000 = 8,000) = 30,000 runs in one second<br>30,000 ÷ 40 = 750 × the average</div>
     <p>An ordinary top of the hour is about 26,000 runs: 2,000 + 20,000, plus about 4,000 of the other 92,000 daily jobs (92,000 ÷ 23 hours). Every top of the minute is 2,000. Between those instants the system is almost idle.</p>
     <h3>Storage</h3>
@@ -430,13 +183,13 @@ pre .tc{color:var(--muted);font-style:italic}
     <ul>
       <li><strong>Size for the peak, not the average.</strong> 40 runs per second fits on one modest database. 30,000 in one second is far beyond the roughly 2,000 runs per second that one database handles even in the design at lower scale.</li>
       <li><strong>Put a buffer between deciding and doing.</strong> The scheduler can mark 30,000 runs due in a second; workers need 10 to 60 seconds to run them. The dispatch queue absorbs the difference.</li>
-      <li><strong>Decide who waits.</strong> If the burst takes 10 seconds to clear, some runs are 10 seconds late. Priority and fairness decide which ones.</li>
+      <li data-req="NFR4 NFR5"><strong>Decide who waits.</strong> If the burst takes 10 seconds to clear, some runs are 10 seconds late. Priority and fairness decide which ones.</li>
       <li><strong>Storage is not the hard part; the write burst is.</strong> About 100 GB of hot data needs only retention, but the 90,000 row writes of the firing second need batching and a sharded job store.</li>
     </ul>
   </div>
 </section>
 
-<section id="system" data-toc="High-level design" data-nodes="api store sched lease queue work">
+<section id="system" data-toc="High-level design" data-nodes="api store sched queue work">
   <div class="sh"><h2>High-level design</h2></div>
   <p class="lede">The design separates three concerns (storing what should run, deciding when it is due, and running it) so each part scales and fails independently.</p>
   <figure><div class="scroll"><svg viewBox="-2 0 532 250" style="min-width:460px;max-width:620px;margin:0 auto" role="img" aria-label="Architecture: the API writes to the job store; scheduler nodes load due runs, hold leases on partitions and publish to the dispatch queue; workers execute runs and write results back to the store.">
@@ -477,7 +230,7 @@ pre .tc{color:var(--muted);font-style:italic}
   data-more2="what create, edit, cancel and retry each do for the caller"
   data-more3="an example create request, how each call works in the store, safe retries of create, runs due very soon, validation, tenancy and error codes">
   <div class="sh"><h2><span class="num">1</span>API service</h2></div>
-  <p class="lede">Clients use one small REST API to create jobs, cancel them and read their runs. A request is accepted only once the job and its first run are committed to the job store.</p>
+  <p class="lede" data-req="FR2 NFR1">Clients use one small REST API to create jobs, cancel them and read their runs. A request is accepted only once the job and its first run are committed to the job store.</p>
   <div class="scroll"><table>
     <tr><th>Endpoint</th><th>What it does</th></tr>
     <tr><td><code>POST /v1/jobs</code></td><td>Create a one-off or cron job</td></tr>
@@ -495,13 +248,13 @@ pre .tc{color:var(--muted);font-style:italic}
       <li><strong>Create</strong> answers only after the job and its first run are committed together, so an accepted job is durable.</li>
       <li><strong>Edit</strong> changes the schedule, spec or policies. The next run that has not started is replaced to match; runs already started keep the settings they began with.</li>
       <li><strong>Cancel a job</strong> stops it scheduling more runs. Runs not yet started are cancelled; runs already executing finish but are not retried.</li>
-      <li><strong>Cancel a run</strong> stops one run that has not finished. For a cron job, the rest of the series carries on.</li>
+      <li data-req="FR2"><strong>Cancel a run</strong> stops one run that has not finished. For a cron job, the rest of the series carries on.</li>
       <li><strong>Retry</strong> sends a dead run back to pending under the same run id, so the receiver sees the same idempotency key.</li>
     </ul>
   </div>
   <div data-l="3">
     <h3>Creating a job</h3>
-<pre><code>POST /v1/jobs
+<pre data-lang="json"><code>POST /v1/jobs
 Idempotency-Key: 6c1e0b2d-reports-daily
 {
   "schedule": "0 9 * * *",
@@ -520,21 +273,21 @@ Idempotency-Key: 6c1e0b2d-reports-daily
 
 201 Created
 { "job_id": "j_7f3a", "next_run_at": "2026-11-17T08:00:00Z" }</code></pre>
-    <p>A one-off job sends <code>"run_at": "2026-11-17T09:00:00Z"</code> in place of <code>schedule</code>. <code>kind</code> chooses which executor runs the job, and <code>spec</code> holds that kind’s settings, including its timeout; a container job sends <code>"kind": "container"</code> with an image, command and resource limits instead (example in the <a href="#job-store">job store</a>). Each body field maps to a column of the <code>jobs</code> table; the idempotency key arrives as a header. <code>backoff_base</code> and <code>backoff_cap</code> are optional and default to 2 s and 5 minutes. <code>next_run_at</code> in the response is not stored on the job: it is the <code>scheduled_at</code> of the job’s pending run that has not been attempted.</p>
+    <p data-req="FR1">A one-off job sends <code>"run_at": "2026-11-17T09:00:00Z"</code> in place of <code>schedule</code>. <code>kind</code> chooses which executor runs the job, and <code>spec</code> holds that kind’s settings, including its timeout; a container job sends <code>"kind": "container"</code> with an image, command and resource limits instead (example in the <a href="#job-store">job store</a>). Each body field maps to a column of the <code>jobs</code> table; the idempotency key arrives as a header. <code>backoff_base</code> and <code>backoff_cap</code> are optional and default to 2 s and 5 minutes. <code>next_run_at</code> in the response is not stored on the job: it is the <code>scheduled_at</code> of the job’s pending run that has not been attempted.</p>
     <h3>How each call works in the store</h3>
     <ul>
-      <li><strong>Create</strong> inserts the job row and its first pending run in one transaction, then answers. The job is durable from the moment that commit succeeds.</li>
-      <li><strong>Edit</strong> changes the definition and replaces the job’s next run in the same transaction: the pending run that has not been attempted yet (<code>attempt = 0</code>) moves to <code>cancelled</code> with <code>cancel_reason = 'replaced_by_edit'</code>, and a new one is inserted from the new schedule. The uniqueness rule on <code>(job_id, scheduled_at)</code> leaves cancelled rows out, so when only the spec or policies change, the replacement takes the same scheduled time without a conflict. Every edit also raises the job’s <code>version</code>. Runs copy it, and a first attempt is dispatched only while its version still matches the job, so a run planned under the old schedule can never fire next to the new one. Runs that have already started, including those waiting to retry, keep the spec and policies they copied and are not affected.</li>
-      <li><strong>Cancel a job</strong> sets the job’s <code>status</code> to <code>cancelled</code>, raises its <code>version</code>, and moves its pending runs to the <code>cancelled</code> state (<code>cancel_reason = 'job_cancelled'</code>), in one transaction. The rows stay, so the job and its history remain queryable. A run already loaded by a scheduler is not hunted down; its conditional update finds no pending row when it fires. Runs already dispatched or running continue, but they create no next run, and a failure moves them to <code>cancelled</code> with <code>last_error</code> kept instead of retrying them. Both checks sit inside the writes themselves (the dispatch write and the worker’s failure write), so a cancel that commits mid-transaction cannot slip past them.</li>
+      <li data-req="NFR1"><strong>Create</strong> inserts the job row and its first pending run in one transaction, then answers. The job is durable from the moment that commit succeeds.</li>
+      <li data-req="FR3"><strong>Edit</strong> changes the definition and replaces the job’s next run in the same transaction: the pending run that has not been attempted yet (<code>attempt = 0</code>) moves to <code>cancelled</code> with <code>cancel_reason = 'replaced_by_edit'</code>, and a new one is inserted from the new schedule. The uniqueness rule on <code>(job_id, scheduled_at)</code> leaves cancelled rows out, so when only the spec or policies change, the replacement takes the same scheduled time without a conflict. Every edit also raises the job’s <code>version</code>. Runs copy it, and a first attempt is dispatched only while its version still matches the job, so a run planned under the old schedule can never fire next to the new one. Runs that have already started, including those waiting to retry, keep the spec and policies they copied and are not affected.</li>
+      <li data-req="FR2"><strong>Cancel a job</strong> sets the job’s <code>status</code> to <code>cancelled</code>, raises its <code>version</code>, and moves its pending runs to the <code>cancelled</code> state (<code>cancel_reason = 'job_cancelled'</code>), in one transaction. The rows stay, so the job and its history remain queryable. A run already loaded by a scheduler is not hunted down; its conditional update finds no pending row when it fires. Runs already dispatched or running continue, but they create no next run, and a failure moves them to <code>cancelled</code> with <code>last_error</code> kept instead of retrying them. Both checks sit inside the writes themselves (the dispatch write and the worker’s failure write), so a cancel that commits mid-transaction cannot slip past them.</li>
       <li><strong>Cancel a run</strong> moves a pending or dispatched run straight to <code>cancelled</code> with a conditional update (<code>WHERE state IN ('pending', 'dispatched')</code>), setting <code>cancelled_at</code> and <code>cancel_reason = 'client'</code>, so a worker that later receives it from the queue finds that its claim matches no rows. If it was the pending run of an active cron job, the same transaction inserts its successor, computed from its scheduled time, so cancelling one run never ends the series. A running run gets <code>cancel_requested_at</code>; its worker sees that on the next heartbeat, stops the container or abandons the HTTP call (which may already have taken effect), and records <code>cancelled</code> with its fenced result write.</li>
-      <li><strong>Retry</strong> resets the same dead run to pending. It keeps its run id, so the receiver sees the same idempotency key. It does not reset <code>attempt</code>: it raises the run’s attempt limit by the job’s <code>max_attempts</code>, so the retry gets a fresh budget while <code>attempt</code> keeps counting up (<a href="#dispatch">dispatch queue and workers</a> explains why the counter must never go back). It also adds one to <code>manual_retries</code>, sets <code>last_retried_at</code>, and records <code>attempts_before_retry = attempt</code>, so backoff starts again from its base. Retry is refused if the job has been cancelled, or once the run has been dead for longer than the 14-day window.</li>
+      <li data-req="FR4"><strong>Retry</strong> resets the same dead run to pending. It keeps its run id, so the receiver sees the same idempotency key. It does not reset <code>attempt</code>: it raises the run’s attempt limit by the job’s <code>max_attempts</code>, so the retry gets a fresh budget while <code>attempt</code> keeps counting up (<a href="#dispatch">dispatch queue and workers</a> explains why the counter must never go back). It also adds one to <code>manual_retries</code>, sets <code>last_retried_at</code>, and records <code>attempts_before_retry = attempt</code>, so backoff starts again from its base. Retry is refused if the job has been cancelled, or once the run has been dead for longer than the 14-day window.</li>
     </ul>
     <h3>Details that matter</h3>
     <ul>
       <li><strong>Safe retries of create.</strong> The client sends its own <code>Idempotency-Key</code> header on <code>POST /v1/jobs</code>, so a create that timed out and was sent again does not produce two jobs. When the header is present, the API derives <code>job_id</code> from a hash of <code>(tenant_id, idempotency_key)</code>, so a repeat maps to the same job id, the same partition and the same shard. The key is stored on the job under <code>UNIQUE (tenant_id, idempotency_key)</code>, which therefore only ever has to be checked on one shard; a repeated create hits the constraint and returns the job created the first time.</li>
       <li><strong>Runs due very soon.</strong> A job created inside the scheduler’s 30-second lookahead window is pushed straight to the node that owns its partition, so its first run does not wait for the next poll.</li>
       <li><strong>Validation at the door.</strong> Reject cron expressions that do not parse, unknown time zones, and specs that fail their kind’s schema. Each kind adds its own checks: an HTTP URL must not point at internal addresses (checked again when the worker connects, because DNS can change in between); a container image must come from the tenant’s allowed registries, with CPU and memory inside its quota.</li>
-      <li><strong>Tenancy.</strong> The API derives the tenant from the authenticated caller and ignores any tenant named in the body. Every read and write is scoped to it, and create is rate-limited per tenant.</li>
+      <li data-req="FR5"><strong>Tenancy.</strong> The API derives the tenant from the authenticated caller and ignores any tenant named in the body. Every read and write is scoped to it, and create is rate-limited per tenant.</li>
       <li><strong>Errors.</strong> <code>400</code> for an invalid schedule or spec, <code>404</code> for a job or run the tenant does not own, <code>409</code> for retrying a run that is not dead, whose job is cancelled or whose 14-day window has passed, or cancelling a run that has already finished, <code>429</code> when the tenant is over its rate limit.</li>
     </ul>
   </div>
@@ -544,7 +297,7 @@ Idempotency-Key: 6c1e0b2d-reports-daily
   data-more2="the two kinds of record, the schema, copying instead of referencing, the “what’s due” index, sharding, cron run creation and misfires, checking the series, and surviving a database failure"
   data-more3="example rows, the index list, daylight-saving changes, the series check query, why counters never move backwards, choosing a database by scale and keeping the hot table small">
   <div class="sh"><h2><span class="num">2</span>Job store</h2></div>
-  <p class="lede">The job store is the single source of truth: every other component can crash and rebuild its state from it.</p>
+  <p class="lede" data-req="NFR1">The job store is the single source of truth: every other component can crash and rebuild its state from it.</p>
   <div data-l="2">
     <p>It holds two kinds of record, because they behave differently.</p>
     <div class="scroll"><table>
@@ -597,7 +350,7 @@ Idempotency-Key: 6c1e0b2d-reports-daily
       <tr><td>j_c204</td><td>t_globex</td><td>cancelled</td><td>http</td><td>NULL (one-off: <code>run_at</code> 2026-11-16 12:00Z)</td><td>UTC</td><td>critical</td><td>8</td><td>fire_all</td></tr>
     </table></div>
     <p>The <code>spec</code> column holds what to run, in the shape its <code>kind</code> defines. j_7f3a is an HTTP call:</p>
-<pre><code>{
+<pre data-lang="json"><code>{
   "method": "POST",
   "url": "https://api.acme.example/reports/daily",
   "headers": { "Content-Type": "application/json" },
@@ -605,7 +358,7 @@ Idempotency-Key: 6c1e0b2d-reports-daily
   "timeout_seconds": 30
 }</code></pre>
     <p>j_91bc is a container job:</p>
-<pre><code>{
+<pre data-lang="json"><code>{
   "image": "registry.acme.example/inventory-sync:1.4",
   "command": ["sync", "--since", "5m"],
   "env": { "REGION": "eu-west-1" },
@@ -659,15 +412,15 @@ Idempotency-Key: 6c1e0b2d-reports-daily
 
   <div data-l="2">
     <h3>Design rules</h3>
-    <p><strong>Copy, don’t reference.</strong> When a run is created, copy the spec, timeout and retry policy from the definition into the run row, along with priority, misfire policy and the job’s <code>version</code>. An edit made while the 09:00 run is executing then cannot change that run, and the version lets the dispatch write reject a run planned before the edit.</p>
+    <p data-req="FR3"><strong>Copy, don’t reference.</strong> When a run is created, copy the spec, timeout and retry policy from the definition into the run row, along with priority, misfire policy and the job’s <code>version</code>. An edit made while the 09:00 run is executing then cannot change that run, and the version lets the dispatch write reject a run planned before the edit.</p>
     <p><strong>Index for “what’s due”.</strong> The scheduler’s question is always “which pending runs are due before time T?” Index on <code>(partition_id, state, next_attempt_at)</code> so that is a short range scan, not a full table scan.</p>
     <p><strong>Shard by partition.</strong> The firing second’s 90,000 row writes are more than one primary takes (<a href="#estimates">capacity estimates</a>), so the job store is sharded, and the shard key is the scheduler partition: a partition’s jobs, runs, lease and outbox rows all live on one shard. Every transaction in this design then stays on one shard, and each of the 256 partitions belongs to exactly one of, say, 16 shards.</p>
     <div class="brief"><b>Brief: sharding.</b> Splitting one logical table across several database servers, each holding a slice of rows chosen by a key. Here the key is the partition, itself a hash of <code>job_id</code>, so load spreads evenly and one job’s runs stay together.</div>
-    <p><strong>Cron runs are created one at a time.</strong> When a cron run is dispatched, compute the next fire time from the <em>previous scheduled time</em> (not from now) and insert that run in the same transaction; the dispatch write itself checks that the job is still <code>active</code>. The dispatch and the insert commit together or not at all, so a crash can delay the series but never break it. Cancelling a pending cron run inserts its successor the same way (<a href="#api">API service</a>). Add <code>UNIQUE (job_id, scheduled_at)</code>, leaving cancelled rows out, so a retried insert is a harmless no-op.</p>
-    <p><strong>Misfires.</strong> When the run being dispatched is overdue by more than a threshold (for example 60 s), the scheduler applies its copied <code>misfire_policy</code>. <em>Fire all</em> dispatches it and computes the next time from its scheduled time, as above, so every missed time gets its run in turn. <em>Coalesce</em> dispatches it once and computes the next time from now, so the missed times in between never get a run. <em>Skip</em> does not dispatch it: it moves it to <code>skipped</code> and computes the next time from now.</p>
+    <p data-req="FR1 NFR1"><strong>Cron runs are created one at a time.</strong> When a cron run is dispatched, compute the next fire time from the <em>previous scheduled time</em> (not from now) and insert that run in the same transaction; the dispatch write itself checks that the job is still <code>active</code>. The dispatch and the insert commit together or not at all, so a crash can delay the series but never break it. Cancelling a pending cron run inserts its successor the same way (<a href="#api">API service</a>). Add <code>UNIQUE (job_id, scheduled_at)</code>, leaving cancelled rows out, so a retried insert is a harmless no-op.</p>
+    <p data-req="FR1 FR3"><strong>Misfires.</strong> When the run being dispatched is overdue by more than a threshold (for example 60 s), the scheduler applies its copied <code>misfire_policy</code>. <em>Fire all</em> dispatches it and computes the next time from its scheduled time, as above, so every missed time gets its run in turn. <em>Coalesce</em> dispatches it once and computes the next time from now, so the missed times in between never get a run. <em>Skip</em> does not dispatch it: it moves it to <code>skipped</code> and computes the next time from now.</p>
     <p data-l="3"><strong>Daylight-saving changes.</strong> A cron time is evaluated in the job’s own time zone. A local time that does not exist (02:30 on the spring change) runs at the next valid instant, 03:00; a local time that occurs twice (on the autumn change) runs once, at its first occurrence. <code>scheduled_at</code> is stored in UTC, so the unique index sees one value either way.</p>
-    <p><strong>Checking the series.</strong> Creating runs one at a time has one weak point: if anything ever leaves an active cron job with no pending run (a bug, a manual fix in the database, a path nobody thought of), nothing would create the next one. So the owner of each partition also runs a slow check, every few minutes, of one invariant: every active cron job has exactly one pending run that has not been attempted. A job without one gets its next run inserted from now, as its misfire policy says, and the repair is counted. The count should stay at zero; an alert fires when it does not, because a repair means some path broke the chain.</p>
-<pre data-l="3"><code>SELECT j.job_id FROM jobs j                     -- series check
+    <p data-req="FR1 NFR1"><strong>Checking the series.</strong> Creating runs one at a time has one weak point: if anything ever leaves an active cron job with no pending run (a bug, a manual fix in the database, a path nobody thought of), nothing would create the next one. So the owner of each partition also runs a slow check, every few minutes, of one invariant: every active cron job has exactly one pending run that has not been attempted. A job without one gets its next run inserted from now, as its misfire policy says, and the repair is counted. The count should stay at zero; an alert fires when it does not, because a repair means some path broke the chain.</p>
+<pre data-lang="sql" data-l="3"><code>SELECT j.job_id FROM jobs j                     -- series check
 WHERE j.partition_id = ? AND j.status = 'active'
   AND j.schedule IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM runs r
@@ -688,7 +441,7 @@ WHERE j.partition_id = ? AND j.status = 'active'
       <tr><td>Quorum commit</td><td>The primary and at least one of two or more replicas have it (Postgres <code>ANY 1 (r1, r2)</code>, MySQL semi-sync)</td><td>Nothing</td><td>About 1–2 ms per commit within a region; one slow replica does not stall commits</td></tr>
       <tr><td>Managed quorum storage</td><td>The storage layer holds it in several zones (Aurora, AlloyDB, Cloud SQL HA)</td><td>Nothing</td><td>No replicas to run yourself; tied to one provider</td></tr>
     </table></div>
-    <p><strong>This design uses asynchronous replication.</strong> It is the usual default, costs nothing per commit, and a database failover is rare. The price is a loss window, which NFR1 states: writes acknowledged in roughly the last second before the primary died may be gone. Keep the window bounded: failover refuses to promote a replica that lags by more than about a second (Patroni’s <code>maximum_lag_on_failover</code>, or the equivalent elsewhere), and replication lag is watched like any other health signal.</p>
+    <p data-req="NFR1 NFR1"><strong>This design uses asynchronous replication.</strong> It is the usual default, costs nothing per commit, and a database failover is rare. The price is a loss window, which NFR1 states: writes acknowledged in roughly the last second before the primary died may be gone. Keep the window bounded: failover refuses to promote a replica that lags by more than about a second (Patroni’s <code>maximum_lag_on_failover</code>, or the equivalent elsewhere), and replication lag is watched like any other health signal.</p>
     <p>What a lost write means, by kind:</p>
     <ul>
       <li><strong>A create, edit, cancel or retry.</strong> The client was told it succeeded and it did not. This is the loss NFR1 accepts. A client that sends its create again with the same idempotency key after a failover gets the job back safely; edits and cancels can simply be repeated.</li>
@@ -699,22 +452,22 @@ WHERE j.partition_id = ? AND j.status = 'active'
     <p>Moving to quorum commit later changes nothing else in the design: the same failover simply loses nothing, and NFR1 drops its exception.</p>
     <h3 data-l="3">Counters never move backwards</h3>
     <p data-l="3">With asynchronous replication, a lease claim at epoch 8 can vanish with the old primary, and the next claim hands out 8 again, which is exactly what fencing must never allow; a lost run claim does the same to <code>attempt</code>. So the new primary is promoted with writes blocked, and a failover hook raises every counter by a margin far larger than a second’s worth of increments before writes are let through:</p>
-<pre data-l="3"><code>UPDATE leases SET epoch = epoch + 1000,                -- failover hook
+<pre data-lang="sql" data-l="3"><code>UPDATE leases SET epoch = epoch + 1000,                -- failover hook
        owner = NULL, expires_at = now();
 
 UPDATE runs SET attempt = attempt + 1000,
        max_attempts = max_attempts + 1000,
        attempts_before_retry = attempts_before_retry + 1000
 WHERE state IN ('pending', 'dispatched', 'running');</code></pre>
-    <p data-l="3">Every lease is expired, so every partition is claimed again with a higher epoch. Every run that is not final moves its attempt counter forward, and its limit and backoff base with it, so the retries left and the backoff are unchanged; only the attempt number the receiver sees jumps. A worker still running an attempt on that shard finds that its next heartbeat matches nothing and stops, and the reaper runs the run again. A failover therefore costs one round of repeats on that shard, and a stale write is never accepted.</p>
+    <p data-l="3" data-req="NFR3">Every lease is expired, so every partition is claimed again with a higher epoch. Every run that is not final moves its attempt counter forward, and its limit and backoff base with it, so the retries left and the backoff are unchanged; only the attempt number the receiver sees jumps. A worker still running an attempt on that shard finds that its next heartbeat matches nothing and stops, and the reaper runs the run again. A failover therefore costs one round of repeats on that shard, and a stale write is never accepted.</p>
   </div>
 </section>
 
-<section id="scheduler" class="k-sched" data-toc="Scheduler" data-num="3" data-nodes="sched lease"
+<section id="scheduler" class="k-sched" data-toc="Scheduler" data-num="3" data-nodes="sched"
   data-more2="why the obvious designs fail, partitions, leases, fencing with a sequence diagram, and the loop each owner runs"
   data-more3="the claim, renew and release writes, failover and rebalancing, tuning the lease TTL, and when to skip all of this">
   <div class="sh"><h2><span class="num">3</span>Scheduler</h2></div>
-  <p class="lede">The scheduler fires each run at the right time, and each firing is made by exactly one scheduler node, even when scheduler machines crash. The difficulty is coordination: every run must be covered by exactly one machine.</p>
+  <p class="lede" data-req="NFR2 NFR3">The scheduler fires each run at the right time, and each firing is made by exactly one scheduler node, even when scheduler machines crash. The difficulty is coordination: every run must be covered by exactly one machine.</p>
   <p>The standard answer has three parts. <strong>Partitions</strong> split the job space into fixed slices. A <strong>lease</strong>, a lock that expires unless renewed, gives each slice exactly one owner. <strong>Fencing</strong> makes the storage reject writes from an owner whose lease has passed to someone else. Each lease carries a counter, the epoch, raised every time the slice changes owner; the storage rejects writes that carry an older one.</p>
 
   <div data-l="2">
@@ -744,14 +497,14 @@ WHERE state IN ('pending', 'dispatched', 'running');</code></pre>
     <p>A node can freeze: a long garbage-collection pause, a network partition, a VM migration. It wakes up still believing it owns partitions that were reassigned while it slept. If it dispatches now, runs execute twice and state gets overwritten.</p>
     <div class="brief"><b>Brief: fencing token.</b> A number that increases every time ownership changes hands. Every write carries the number its writer was given; the storage rejects any write carrying a number lower than the current one. The stale owner’s writes simply fail.</div>
     <p>The epoch is the fencing token. The dispatch write checks it:</p>
-<pre><code>UPDATE runs SET state = 'dispatched', dispatched_at = now()
+<pre data-lang="sql"><code>UPDATE runs SET state = 'dispatched', dispatched_at = now()
 WHERE run_id = ?
   AND state = 'pending'
   AND (SELECT epoch FROM leases WHERE partition_id = ?) = ?   -- my epoch
   AND (SELECT status FROM jobs WHERE job_id = runs.job_id) = 'active'
   AND (attempt &gt; 0 OR job_version =
        (SELECT version FROM jobs WHERE job_id = runs.job_id)); -- not replaced by an edit</code></pre>
-    <p>Zero rows affected means the run is no longer this node’s to fire. The check must live in the storage write itself; a check done earlier in the scheduler’s own memory is exactly what a frozen node gets wrong. The job’s status is checked in the same statement for the same reason: a cancel that commits while the dispatch transaction runs would not be seen by an earlier read.</p>
+    <p data-req="NFR3">Zero rows affected means the run is no longer this node’s to fire. The check must live in the storage write itself; a check done earlier in the scheduler’s own memory is exactly what a frozen node gets wrong. The job’s status is checked in the same statement for the same reason: a cancel that commits while the dispatch transaction runs would not be seen by an earlier read.</p>
     <p>Zero rows alone does not say why, and the reasons need different reactions, so the node reads the lease and the run once. If the epoch moved, the lease is gone: stop working on that partition. If the run is no longer pending, it was cancelled or replaced: drop it. If it is still pending but its job is cancelled or its version is stale (an edit or a cancel raced the insert of this run), move it to <code>cancelled</code> with a guarded update (<code>WHERE run_id = ? AND state = 'pending'</code>), so it does not come back on every poll.</p>
     <figure><div class="scroll"><svg viewBox="0 0 720 320" style="min-width:600px" role="img" aria-label="Fencing sequence: node A claims partition 17 with epoch 4 and freezes; node B claims it with epoch 5 and dispatches; node A wakes and its write with epoch 4 is rejected by the job store.">
       <g class="k-sched"><rect class="box" x="30" y="10" width="120" height="34" rx="8"/><text class="t" x="90" y="27" text-anchor="middle" dominant-baseline="central">Node A</text>
@@ -760,7 +513,7 @@ WHERE run_id = ?
       <g class="k-store"><rect class="box" x="570" y="10" width="120" height="34" rx="8"/><text class="t" x="630" y="27" text-anchor="middle" dominant-baseline="central">Job store</text></g>
       <path d="M90 44V310M270 44V310M450 44V310M630 44V310" stroke="var(--line)" stroke-width="1.2" stroke-dasharray="4 4"/>
       <path class="wire" marker-end="url(#ah)" d="M90 84H268"/><text class="s" x="180" y="76" text-anchor="middle">claim partition 17: epoch 4</text>
-      <rect x="82" y="100" width="16" height="130" rx="4" fill="color-mix(in srgb,var(--due) 55%,var(--surface))" stroke="var(--queue)"/><text class="s" x="104" y="150">frozen</text><text class="s" x="104" y="164">(GC pause)</text>
+      <rect x="82" y="100" width="16" height="130" rx="4" fill="color-mix(in srgb,var(--mark) 55%,var(--surface))" stroke="var(--queue)"/><text class="s" x="104" y="150">frozen</text><text class="s" x="104" y="164">(GC pause)</text>
       <text class="s" x="278" y="118">lease expires</text>
       <path class="wire" marker-end="url(#ah)" d="M450 144H272"/><text class="s" x="360" y="136" text-anchor="middle">claim partition 17: epoch 5</text>
       <path class="wire" marker-end="url(#ah)" d="M450 194H628"/><text class="s" x="540" y="186" text-anchor="middle">dispatch, epoch 5: accepted</text>
@@ -770,18 +523,17 @@ WHERE run_id = ?
     <figcaption>Read top to bottom as time passing. Node A never learns it was frozen; the only thing that stops its stale write is the job store comparing epochs.</figcaption></figure>
     <h3>The loop each owner runs</h3>
     <ol>
-      <li><strong>Poll ahead.</strong> About once a second: <code>SELECT run_id, next_attempt_at FROM runs WHERE partition_id = ? AND state = 'pending' AND next_attempt_at &lt;= now() + 30s</code>. One query per partition per second, however many jobs.</li>
+      <li data-req="NFR2"><strong>Poll ahead.</strong> About once a second: <code>SELECT run_id, next_attempt_at FROM runs WHERE partition_id = ? AND state = 'pending' AND next_attempt_at &lt;= now() + 30s</code>. One query per partition per second, however many jobs.</li>
       <li><strong>Buffer in memory</strong> in a timing wheel or min-heap keyed by fire time (see <a href="#timing-wheel">the timing wheel</a>). Runs created through the API inside the window are pushed straight to the owning node.</li>
       <li><strong>Fire.</strong> When a run’s time comes, do the fenced update above and insert an outbox row in the same transaction. Dispatches due in the same tick are written as one transaction per partition, in priority order, so at the peak critical and high-priority runs commit and reach the queue first. A relay publishes the rows to the dispatch queue (<a href="#dispatch">dispatch queue and workers</a> explains why the scheduler does not publish directly).</li>
-      <li><strong>Reschedule.</strong> For cron jobs, insert the next run in the same transaction as the update; the update has already checked that the job is <code>active</code>. The new run copies the job’s current <code>version</code>. If the run was overdue, its misfire policy decides whether it is dispatched and where the next time is counted from (<a href="#job-store">job store</a>).</li>
+      <li data-req="FR1"><strong>Reschedule.</strong> For cron jobs, insert the next run in the same transaction as the update; the update has already checked that the job is <code>active</code>. The new run copies the job’s current <code>version</code>. If the run was overdue, its misfire policy decides whether it is dispatched and where the next time is counted from (<a href="#job-store">job store</a>).</li>
       <li><strong>Look after the partition.</strong> The owner also runs the partition’s relay, reaper, sweeper and series check, so they fail over with the lease and never run twice.</li>
     </ol>
   </div>
   <div data-l="3">
-    <h3>Failover and rebalancing</h3>
     <h3>Claiming, renewing and releasing a lease</h3>
     <p>Two nodes can try to claim the same expired lease at once, and an owner can renew just as another node claims. Each write carries its guard, like every other write on this page:</p>
-<pre><code>UPDATE leases SET owner = ?, epoch = epoch + 1,              -- claim
+<pre data-lang="sql"><code>UPDATE leases SET owner = ?, epoch = epoch + 1,              -- claim
        expires_at = now() + interval '20 seconds'
 WHERE partition_id = ? AND expires_at &lt; now()
 RETURNING epoch;
@@ -793,7 +545,7 @@ UPDATE leases SET owner = NULL, expires_at = now()            -- release
 WHERE partition_id = ? AND owner = ? AND epoch = ?;</code></pre>
     <p><code>now()</code> is the database’s clock, so expiry is decided in one place, never by comparing two machines’ clocks. Of two simultaneous claims, the row lock lets one through and the other matches no rows. A renew that matches no rows means the lease is gone, and the node stops at once. Lease rows are never deleted, so the epoch only ever goes up.</p>
     <h3>Failover and rebalancing</h3>
-    <p>When a node claims a partition, after a crash or a rebalance, it starts the loop from scratch: query the database, fill its in-memory buffer, continue. Nothing is handed over in memory, which is why failover is simple. Runs that came due during the gap fire late but still fire, in priority order. <strong>The worst-case failover delay is the TTL, plus up to one claim interval for another node to notice, plus one poll</strong>, and the TTL is the main tuning knob: shorter recovers faster but causes more false expirations during brief network blips.</p>
+    <p data-req="NFR1 NFR2">When a node claims a partition, after a crash or a rebalance, it starts the loop from scratch: query the database, fill its in-memory buffer, continue. Nothing is handed over in memory, which is why failover is simple. Runs that came due during the gap fire late but still fire, in priority order. <strong>The worst-case failover delay is the TTL, plus up to one claim interval for another node to notice, plus one poll</strong>, and the TTL is the main tuning knob: shorter recovers faster but causes more false expirations during brief network blips.</p>
     <p>When a node joins, existing nodes release partitions down to about <code>total / nodes</code> each: finish in-flight dispatches, release the lease (the statement above), and the new owner claims it with <code>epoch + 1</code>. Release a few at a time to avoid every node reloading at once. Kafka’s consumer-group rebalancing (generation ids) and Temporal’s shard ownership (range ids) follow the same idea: move a few owners at a time and fence the old one.</p>
     <h3>When to skip all of this</h3>
     <p>Below about 2,000 runs per second you can skip partitions and leases entirely. See <a href="#simple-design">the design at lower scale</a>: several identical schedulers using <code>SELECT ... FOR UPDATE SKIP LOCKED</code> let the database’s row locks do the coordination.</p>
@@ -804,7 +556,7 @@ WHERE partition_id = ? AND owner = ? AND epoch = ?;</code></pre>
   data-more2="the problem it solves, the three options compared, insert and rounds, how the scheduler uses the wheel, and the same job with a min-heap"
   data-more3="hierarchical wheels, and basic implementations of the wheel and the heap in Go">
   <div class="sh"><h2>Inside the scheduler: the timing wheel</h2></div>
-  <p class="lede">A timing wheel holds a large number of timers cheaply, so the scheduler can fire each run within one tick of its due time while querying the database only about once a second. At this page’s size a min-heap also works; the wheel pays off at much larger timer counts.</p>
+  <p class="lede" data-req="NFR2">A timing wheel holds a large number of timers cheaply, so the scheduler can fire each run within one tick of its due time while querying the database only about once a second. At this page’s size a min-heap also works; the wheel pays off at much larger timer counts.</p>
   <div data-l="2">
     <h3>The problem</h3>
     <p>Each poll returns every run due in the next 30 seconds, possibly thousands, each due at a different millisecond. Something in memory must hold them and hand each back at the right time. Three options:</p>
@@ -843,7 +595,7 @@ WHERE partition_id = ? AND owner = ? AND epoch = ?;</code></pre>
     <p>Round counters waste work: a run ten laps out is visited ten times before it fires. Large systems stack wheels like clock hands: a fine wheel for the next second at 10 ms per slot, a coarser one for the next minute at 1 s per slot. A run starts in the coarsest wheel that covers its delay, and when its slot comes up it moves down to the next finer wheel instead of firing. Kafka uses this for delayed operations; Netty’s <code>HashedWheelTimer</code> is the single-wheel version; the Linux kernel’s timers use a related design.</p>
     <h3>A basic wheel in Go</h3>
     <p>A single-level wheel with round counters fits in about 80 lines. It is the same structure as the simulation above. <code>Add</code> takes the due time, not a delay, and rounds the target tick up, so a run never fires before its time and at most one tick after it.</p>
-<pre style="tab-size:4"><code>package wheel
+<pre data-lang="go" style="tab-size:4"><code>package wheel
 
 import (
 	"sync"
@@ -937,8 +689,8 @@ func (w *Wheel) advance() {
       <li><strong>Due now or overdue: never the current slot.</strong> The pointer has already visited the current slot, so a run placed there waits a whole lap. Fire such a run directly without inserting it, or put it in the next slot and accept up to one tick of delay.</li>
       <li><strong>Firing means the fenced write plus an outbox row, in one transaction.</strong> Zero rows updated is handled as in <a href="#scheduler">the scheduler</a>: stop the partition if the lease moved, otherwise drop the run, or cancel it if it is stale.</li>
       <li><strong>On lease loss, clear that partition’s entries,</strong> so a former owner stops firing runs it no longer owns.</li>
-      <li><strong>Cancel lazily.</strong> Don’t search the wheel for a cancelled run; let it fire and fail the conditional update.</li>
-      <li><strong>Crashes lose nothing.</strong> The wheel is a cache of the database’s next 30 seconds. A new owner repolls and rebuilds it.</li>
+      <li data-req="FR2"><strong>Cancel lazily.</strong> Don’t search the wheel for a cancelled run; let it fire and fail the conditional update.</li>
+      <li data-req="NFR1"><strong>Crashes lose nothing.</strong> The wheel is a cache of the database’s next 30 seconds. A new owner repolls and rebuilds it.</li>
     </ul>
     <h3>The same job with a min-heap</h3>
     <p>At this page’s size, at most 30,000 runs in memory before 09:00, a min-heap does the same job, and it is what most schedulers use:</p>
@@ -954,7 +706,7 @@ func (w *Wheel) advance() {
   <div data-l="3">
     <h3>A basic heap buffer in Go</h3>
     <p>The heap version uses the standard library’s <code>container/heap</code>. Both sketches were checked with tests: a run never fires early, fires within its precision (one tick for the wheel), overdue runs fire at once, and a newly added earlier run wakes the heap’s loop.</p>
-<pre style="tab-size:4"><code>package timers
+<pre data-lang="go" style="tab-size:4"><code>package timers
 
 import (
 	"container/heap"
@@ -1043,11 +795,11 @@ func (b *Buffer) Run(stop &lt;-chan struct{}) {
   data-more2="choosing the queue, the crash window and the transactional outbox, who runs the relay, reaper and sweeper, how workers claim and heartbeat, and executors per job kind"
   data-more3="the guarded claim, heartbeat, reaper, result and sweeper writes, a step-by-step timeline of a worker losing its run, and what changes for container jobs">
   <div class="sh"><h2><span class="num">4</span>Dispatch queue and workers</h2></div>
-  <p class="lede">The dispatch queue separates <em>deciding when</em> from <em>doing the work</em>, so a slow run can never delay scheduling. Workers pull runs from it, execute them, and report back to the job store.</p>
+  <p class="lede" data-req="NFR2">The dispatch queue separates <em>deciding when</em> from <em>doing the work</em>, so a slow run can never delay scheduling. Workers pull runs from it, execute them, and report back to the job store.</p>
   <p>The scheduler records the dispatch and a message to send in one database transaction, so a crash can delay a run but never lose it.</p>
   <div data-l="2">
     <h3>The queue</h3>
-    <p>Kafka, SQS or RabbitMQ all work. Use separate queues or topics per priority (and for very large tenants) so a bulk backlog cannot hold up urgent work, and per job kind so each executor pulls only what it can run.</p>
+    <p data-req="FR3 NFR5">Kafka, SQS or RabbitMQ all work. Use separate queues or topics per priority (and for very large tenants) so a bulk backlog cannot hold up urgent work, and per job kind so each executor pulls only what it can run.</p>
     <div class="brief" data-noterm="Partition"><b>Brief: Kafka offsets and head-of-line blocking.</b> A consumer in a classic Kafka consumer group records progress as one offset per partition, meaning “everything before here is done”. A run that takes 30 seconds therefore holds back every run behind it in that partition. Kafka’s newer share groups and SQS-style queues acknowledge each message separately and don’t have this problem, which is why many schedulers prefer them for job dispatch.</div>
     <h3>The crash window between database and queue</h3>
     <p>Firing a run touches two systems: the database (mark <code>dispatched</code>) and the queue (publish). No transaction spans both, so a naive design must choose what a crash between them does:</p>
@@ -1056,11 +808,11 @@ func (b *Buffer) Run(stop &lt;-chan struct{}) {
       <tr><td>Mark, then publish</td><td>Run marked dispatched, never queued</td><td>Silently lost</td></tr>
       <tr><td>Publish, then mark</td><td>Run queued, still pending in the database</td><td>Dispatched twice</td></tr>
     </table></div>
-    <p>If you must choose, prefer the duplicate: receivers can recognise a repeat (see <a href="#correctness">correctness</a>). This design avoids the choice with an outbox:</p>
-    <div class="brief"><b>Brief: transactional outbox.</b> Write the state change <em>and</em> an “outbox” row in one database transaction. A separate relay process reads outbox rows and publishes them to the queue, deleting each after it is acknowledged. The database commit becomes the only decision point, so nothing can be lost; the relay may publish twice, which idempotency absorbs.</div>
+    <p data-req="NFR3">If you must choose, prefer the duplicate: receivers can recognise a repeat (see <a href="#correctness">correctness</a>). This design avoids the choice with an outbox:</p>
+    <div class="brief" data-req="NFR1"><b>Brief: transactional outbox.</b> Write the state change <em>and</em> an “outbox” row in one database transaction. A separate relay process reads outbox rows and publishes them to the queue, deleting each after it is acknowledged. The database commit becomes the only decision point, so nothing can be lost; the relay may publish twice, which idempotency absorbs.</div>
     <figure><div class="flow">
       <div class="nd k-sched"><b>Scheduler</b><small>fires the run</small></div><span class="ar" aria-hidden="true">→</span>
-      <div class="tx"><small>one database transaction</small>
+      <div class="tx k-store"><small>one database transaction</small>
         <div class="nd k-store"><b>runs</b><small>state = dispatched</small></div>
         <div class="nd k-store"><b>outbox</b><small>new event row</small></div></div><span class="ar" aria-hidden="true">→</span>
       <div class="nd k-api"><b>Relay</b><small>reads, publishes, deletes</small></div><span class="ar" aria-hidden="true">→</span>
@@ -1068,9 +820,9 @@ func (b *Buffer) Run(stop &lt;-chan struct{}) {
       <div class="nd k-work"><b>Worker</b><small>same run id every time</small></div>
     </div>
     <figcaption>The state change and the outbox row commit together or not at all. A crash anywhere after the commit only delays publishing, because the outbox row is still there for the relay to pick up.</figcaption></figure>
-    <p><strong>Who runs the relay, reaper and sweeper.</strong> The scheduler node that holds a partition’s lease runs all three for that partition, so they fail over with the lease and never run twice. The relay is woken by each dispatch commit and also polls every 100 ms, so it adds at most about 100 ms to dispatch, and it publishes high-priority rows first. If it stops, nothing reaches the workers, so alert on the age of the oldest outbox row. The <strong>sweeper</strong> finds runs left in <code>dispatched</code> with no claim for 10 minutes and resets them to <code>pending</code>, to be dispatched again. That timeout sits well above the worst queue wait at the peak (60 s) and the time a run may wait for its tenant’s quota, so it never re-dispatches a healthy backlog. It catches whatever slips through every other mechanism.</p>
+    <p data-req="NFR1"><strong>Who runs the relay, reaper and sweeper.</strong> The scheduler node that holds a partition’s lease runs all three for that partition, so they fail over with the lease and never run twice. The relay is woken by each dispatch commit and also polls every 100 ms, so it adds at most about 100 ms to dispatch, and it publishes high-priority rows first. If it stops, nothing reaches the workers, so alert on the age of the oldest outbox row. The <strong>sweeper</strong> finds runs left in <code>dispatched</code> with no claim for 10 minutes and resets them to <code>pending</code>, to be dispatched again. That timeout sits well above the worst queue wait at the peak (60 s) and the time a run may wait for its tenant’s quota, so it never re-dispatches a healthy backlog. It catches whatever slips through every other mechanism.</p>
     <h3>Workers</h3>
-    <p>A worker takes a run, marks it <code>running</code> with its own id, and starts a <strong>visibility timeout</strong>: a deadline, stored in <code>heartbeat_deadline</code>, after which the run counts as abandoned. It is a hold on one run, not a partition lease. While working the worker sends <strong>heartbeats</strong> that push the deadline forward. If the worker dies, heartbeats stop, the deadline passes, and a <strong>reaper</strong> (a background sweep) puts the run back to <code>pending</code> after a backoff, or to <code>dead</code> when its attempts are used up.</p>
+    <p data-req="NFR1">A worker takes a run, marks it <code>running</code> with its own id, and starts a <strong>visibility timeout</strong>: a deadline, stored in <code>heartbeat_deadline</code>, after which the run counts as abandoned. It is a hold on one run, not a partition lease. While working the worker sends <strong>heartbeats</strong> that push the deadline forward. If the worker dies, heartbeats stop, the deadline passes, and a <strong>reaper</strong> (a background sweep) puts the run back to <code>pending</code> after a backoff, or to <code>dead</code> when its attempts are used up.</p>
     <p>Each claim raises the run’s attempt counter, and every later write by that worker names the value it got. Once another worker claims the run the number has moved on, so a late write matches nothing.</p>
     <p>Workers are <strong>executors</strong>, one pool per job kind. The HTTP executor makes the call; the container executor starts the task on a cluster such as Kubernetes or ECS and watches it until it exits. The scheduler, leases, fencing and outbox never look inside the spec. A new kind needs an executor, a validation schema, a queue and a concurrency budget; nothing in scheduling changes.</p>
   </div>
@@ -1079,7 +831,7 @@ func (b *Buffer) Run(stop &lt;-chan struct{}) {
     <p>Workers and the reaper race each other just as scheduler nodes do, and the queue may deliver the same run twice. Every write they make carries its guard in the <code>WHERE</code> clause. The guard is <code>attempt</code>: the claim raises it, and every later write names the value its writer got.</p>
     <div class="brief"><b>Brief: monotonic fencing token.</b> A number that only ever goes up. Each claim raises <code>attempt</code> by one, and the claiming worker remembers the new value. Its later writes all say <code>WHERE attempt = &lt;my value&gt;</code>, so once anyone else claims the run the number has moved on and the old worker’s writes match no rows. This works only if no value is ever handed out twice. If a manual retry reset <code>attempt</code> to 0, the next claims would reuse 1, 2 and 3, and a worker still holding 3 from before the reset could overwrite the new attempt 3. That is why retry raises the attempt limit instead of resetting the counter.</div>
     <p>In the statements below, <code>job_active</code> stands for <code>(SELECT status FROM jobs WHERE job_id = runs.job_id) = 'active'</code>.</p>
-<pre><code>UPDATE runs SET state = 'running', worker_id = ?,           -- claim
+<pre data-lang="sql"><code>UPDATE runs SET state = 'running', worker_id = ?,           -- claim
        attempt = attempt + 1, started_at = now(),
        heartbeat_deadline = now() + interval '30 seconds'
 WHERE run_id = ? AND state = 'dispatched'
@@ -1114,10 +866,9 @@ WHERE run_id = ? AND state = 'running' AND attempt = ?
 UPDATE runs SET state = 'pending', dispatched_at = NULL    -- sweeper
 WHERE run_id = ? AND state = 'dispatched'
   AND dispatched_at &lt; now() - interval '10 minutes';</code></pre>
-    <p>A claim that matches no rows means another worker already has the run, or it was cancelled: drop the message. A heartbeat that matches no rows means this worker lost the run: stop. A worker that stops for a cancel records it with the failure write, which turns it into <code>cancelled</code>. The reaper ends a lost attempt exactly as a failure would: <code>cancelled</code> if a cancel was requested or the job is no longer active, <code>dead</code> if the attempts are used up, otherwise <code>pending</code> after a backoff, so a run that kills its worker cannot loop for ever. It names the attempt it saw expire, so a heartbeat that lands first makes the reset match nothing. If a slow worker’s visibility timeout passed and another worker reclaimed the run, the slow worker’s late write affects zero rows and cannot corrupt the newer attempt. When a one-off job’s run reaches a final state, the same transaction sets the job to <code>completed</code>. <code>RETURNING</code> is Postgres syntax; in MySQL, read the row back in the same transaction.</p>
-    <figure>
-      <div class="ctl"><button id="rplay">Play</button><button id="rstep">Next step</button><button id="rall">Show all</button></div>
-      <div class="scroll"><svg id="race" class="race" viewBox="0 0 720 410" style="min-width:600px" role="img" aria-label="Timeline: worker A claims attempt 3 and heartbeats, then freezes; the reaper resets attempt 3 once its deadline passes; worker B claims attempt 4; A wakes and its result with attempt 3 matches no rows; B's result with attempt 4 succeeds.">
+    <p data-req="NFR3">A claim that matches no rows means another worker already has the run, or it was cancelled: drop the message. A heartbeat that matches no rows means this worker lost the run: stop. A worker that stops for a cancel records it with the failure write, which turns it into <code>cancelled</code>. The reaper ends a lost attempt exactly as a failure would: <code>cancelled</code> if a cancel was requested or the job is no longer active, <code>dead</code> if the attempts are used up, otherwise <code>pending</code> after a backoff, so a run that kills its worker cannot loop for ever. It names the attempt it saw expire, so a heartbeat that lands first makes the reset match nothing. If a slow worker’s visibility timeout passed and another worker reclaimed the run, the slow worker’s late write affects zero rows and cannot corrupt the newer attempt. When a one-off job’s run reaches a final state, the same transaction sets the job to <code>completed</code>. <code>RETURNING</code> is Postgres syntax; in MySQL, read the row back in the same transaction.</p>
+    <figure class="steps">
+      <div class="scroll"><svg viewBox="0 0 720 410" style="min-width:600px" role="img" aria-label="Timeline: worker A claims attempt 3 and heartbeats, then freezes; the reaper resets attempt 3 once its deadline passes; worker B claims attempt 4; A wakes and its result with attempt 3 matches no rows; B's result with attempt 4 succeeds.">
         <g class="k-work"><rect class="box" x="20" y="10" width="120" height="34" rx="8"/><text class="t" x="80" y="27" text-anchor="middle" dominant-baseline="central">Worker A</text>
         <rect class="box" x="580" y="10" width="120" height="34" rx="8"/><text class="t" x="640" y="27" text-anchor="middle" dominant-baseline="central">Worker B</text></g>
         <g class="k-store"><rect class="box" x="230" y="10" width="120" height="34" rx="8"/><text class="t" x="290" y="27" text-anchor="middle" dominant-baseline="central">runs row</text></g>
@@ -1125,14 +876,23 @@ WHERE run_id = ? AND state = 'dispatched'
         <path d="M80 44V400M290 44V400M480 44V400M640 44V400" stroke="var(--line)" stroke-width="1.2" stroke-dasharray="4 4"/>
         <g data-s="1"><path class="wire" marker-end="url(#ah)" d="M80 84H288"/><text class="s" x="185" y="76" text-anchor="middle">claim → attempt 3 ✓</text></g>
         <g data-s="2"><path class="wire" marker-end="url(#ah)" d="M80 130H288"/><text class="s" x="185" y="122" text-anchor="middle">heartbeat, attempt 3 ✓</text></g>
-        <g data-s="3"><rect x="72" y="150" width="16" height="132" rx="4" fill="color-mix(in srgb,var(--due) 55%,var(--surface))" stroke="var(--queue)"/><text class="s" x="96" y="210">frozen</text><text class="s" x="96" y="224">deadline passes</text></g>
+        <g data-s="3"><rect x="72" y="150" width="16" height="132" rx="4" fill="color-mix(in srgb,var(--mark) 55%,var(--surface))" stroke="var(--queue)"/><text class="s" x="96" y="210">frozen</text><text class="s" x="96" y="224">deadline passes</text></g>
         <g data-s="4"><path class="wire" marker-end="url(#ah)" d="M480 200H292"/><text class="s" x="385" y="192" text-anchor="middle">reset attempt 3 ✓</text><text class="s" x="298" y="216">pending</text></g>
         <g data-s="5"><path class="wire" marker-end="url(#ah)" d="M640 250H292"/><text class="s" x="560" y="242" text-anchor="middle">claim → attempt 4 ✓</text></g>
         <g data-s="6"><path marker-end="url(#ahb)" d="M80 300H288" stroke="var(--bad)" stroke-width="1.3" fill="none"/><text class="s" x="185" y="292" text-anchor="middle">result, attempt 3</text>
           <path marker-end="url(#ahb)" d="M290 328H82" stroke="var(--bad)" stroke-width="1.3" stroke-dasharray="5 4" fill="none"/><text class="s" x="185" y="320" text-anchor="middle" style="fill:var(--bad)">0 rows: A stops</text></g>
         <g data-s="7"><path class="wire" marker-end="url(#ah)" d="M640 376H292"/><text class="s" x="560" y="368" text-anchor="middle">succeeded, attempt 4 ✓</text></g>
       </svg></div>
-      <figcaption id="racecap">Read top to bottom as time passing, or press Play to step through it. Every write names the attempt its writer holds, so the run can only be finished by its latest claim.</figcaption>
+      <figcaption>Read top to bottom as time passing, or press Play to step through it. Every write names the attempt its writer holds, so the run can only be finished by its latest claim.</figcaption>
+      <ol class="stepnotes">
+        <li>Worker A receives the run from the queue and claims it. The claim matches only a run still in dispatched, and raises attempt from 2 to 3. A remembers 3.</li>
+        <li>While it executes the run, A heartbeats every few seconds. Each heartbeat pushes heartbeat_deadline forward, but only for attempt 3.</li>
+        <li>A freezes, for example in a long garbage-collection pause. Its heartbeats stop and heartbeat_deadline passes.</li>
+        <li>The reaper resets the run to pending. Its WHERE clause repeats what it saw: still running, still attempt 3, deadline passed. Had A heartbeated a moment earlier, the reset would have matched no rows.</li>
+        <li>The run is dispatched again and worker B claims it, raising attempt to 4.</li>
+        <li>A wakes up and writes its result with attempt 3. The row is on attempt 4, so the write matches no rows. A learns it lost the run and discards its result.</li>
+        <li>B finishes and writes succeeded with attempt 4. Only the latest claim can finish the run.</li>
+      </ol>
     </figure>
     <h3>Container jobs</h3>
     <ul>
@@ -1148,22 +908,22 @@ WHERE run_id = ? AND state = 'dispatched'
   data-more2="idempotency keys, retries with exponential backoff and jitter, and the dead-letter queue"
   data-more3="extra request headers, which failures are worth retrying, and poison jobs">
   <div class="sh"><h2>Correctness: at-least-once, idempotency, retries</h2></div>
-  <p class="lede">The system promises <strong>at-least-once</strong> execution and makes duplicates harmless with <strong>idempotency</strong>. That pair is what people usually mean by “exactly-once”.</p>
+  <p class="lede" data-req="NFR3">The system promises <strong>at-least-once</strong> execution and makes duplicates harmless with <strong>idempotency</strong>. That pair is what people usually mean by “exactly-once”.</p>
   <h3>Why exactly-once is impossible</h3>
   <p>A worker calls an endpoint and the call times out. Did the endpoint do the work and the reply get lost, or did the request never arrive? The caller cannot know. It must either retry (risking a duplicate) or give up (risking a loss). A scheduler that never loses work has to retry, so duplicates will happen.</p>
   <div class="brief"><b>Brief: idempotent.</b> An operation is idempotent if doing it twice has the same effect as doing it once. “Set balance to 100” is idempotent; “add 10 to balance” is not.</div>
   <div data-l="2">
     <h3>Idempotency keys</h3>
-    <p>Give every run a unique id and send it on every attempt, for example as an <code>Idempotency-Key</code> header for an HTTP job or a <code>RUN_ID</code> environment variable for a container. The receiver stores each key under a <code>UNIQUE</code> constraint in the same transaction as the work. A repeated key returns the stored result without redoing anything. Keep keys for at least as long as a run can still be retried, including manual retries from the dead-letter queue.</p>
+    <p data-req="NFR3">Give every run a unique id and send it on every attempt, for example as an <code>Idempotency-Key</code> header for an HTTP job or a <code>RUN_ID</code> environment variable for a container. The receiver stores each key under a <code>UNIQUE</code> constraint in the same transaction as the work. A repeated key returns the stored result without redoing anything. Keep keys for at least as long as a run can still be retried, including manual retries from the dead-letter queue.</p>
     <p data-l="3">Also send the scheduled time and the attempt number (<code>X-Scheduled-At</code> and <code>X-Attempt</code> headers, or <code>SCHEDULED_AT</code> and <code>ATTEMPT</code> variables), so the receiver knows which scheduled run this is and whether it is a retry.</p>
     <h3>Retries</h3>
-    <p>Retry failures with <strong>exponential backoff and jitter</strong>:</p>
+    <p data-req="FR4">Retry failures with <strong>exponential backoff and jitter</strong>:</p>
     <div class="formula">delay = random(0, min(cap, base × 2<sup>n − 1</sup>)), where n = attempt − attempts_before_retry</div>
     <p><code>n</code> counts attempts since the last manual retry, so a retried run starts again from the base delay instead of at the cap.</p>
-    <div class="brief"><b>Brief: jitter.</b> Random spread added to retry delays. Without it, every run that failed together at 09:00:00 retries together at 09:00:02, 09:00:06 and so on: synchronized waves that hit an already struggling endpoint at once.</div>
+    <div class="brief" data-req="NFR4"><b>Brief: jitter.</b> Random spread added to retry delays. Without it, every run that failed together at 09:00:00 retries together at 09:00:02, 09:00:06 and so on: synchronized waves that hit an already struggling endpoint at once.</div>
     <p data-l="3">For HTTP jobs, respect what the endpoint tells you: honour <code>Retry-After</code> on 429 and 503 responses. Decide which failures are worth retrying. Timeouts, connection errors and 5xx usually are; a 400 or 404 usually is not, and retrying it only wastes attempts.</p>
     <h3>The dead-letter queue (DLQ)</h3>
-    <p>After <code>max_attempts</code>, a run moves to <code>dead</code>. The DLQ is simply the dead runs of a tenant, kept for a fixed window (for example 14 days) so people can inspect and retry them; after the window, retry answers <code>409</code>, and the row goes when its daily table partition is dropped at 30 days. A manual retry resets the <em>same</em> run (same id, so the same idempotency key) rather than creating a new one.</p>
+    <p data-req="FR4">After <code>max_attempts</code>, a run moves to <code>dead</code>. The DLQ is simply the dead runs of a tenant, kept for a fixed window (for example 14 days) so people can inspect and retry them; after the window, retry answers <code>409</code>, and the row goes when its daily table partition is dropped at 30 days. A manual retry resets the <em>same</em> run (same id, so the same idempotency key) rather than creating a new one.</p>
   </div>
   <div data-l="3">
     <h3>Poison jobs</h3>
@@ -1175,11 +935,11 @@ WHERE run_id = ? AND state = 'dispatched'
   data-more2="misfire policies, priority at the source, fairness between tenants and what to measure"
   data-more3="what happens without a misfire policy, starvation and aging, and a scheduler node failing at the peak">
   <div class="sh"><h2>Behaviour under load</h2></div>
-  <p class="lede">A scheduler is judged by its peaks, not its average. People write <code>0 9 * * *</code>, not <code>17 9 * * *</code>, so at 09:00:00 the runs of the every-minute, hourly and daily jobs all fall due in the same second.</p>
+  <p class="lede" data-req="NFR4">A scheduler is judged by its peaks, not its average. People write <code>0 9 * * *</code>, not <code>17 9 * * *</code>, so at 09:00:00 the runs of the every-minute, hourly and daily jobs all fall due in the same second.</p>
   <p>A platform averaging 40 runs per second can face 30,000 in that one second. Most real-world failures of schedulers are failures of peak behaviour, so design for these cases explicitly. Three per-job and per-tenant rules decide who waits: a misfire policy for runs missed in an outage, priority applied where runs are dispatched and claimed, and caps that keep one tenant from taking the whole peak.</p>
   <div data-l="2">
     <h3>Missed runs: choose a misfire policy</h3>
-    <p>If the system was down at 03:00, what happens on recovery? Make it a per-job setting, applied by the scheduler when it dispatches an overdue run (<a href="#job-store">job store</a>):</p>
+    <p data-req="FR3">If the system was down at 03:00, what happens on recovery? Make it a per-job setting, applied by the scheduler when it dispatches an overdue run (<a href="#job-store">job store</a>):</p>
     <div class="scroll"><table>
       <tr><th>Policy</th><th>Behaviour</th><th>Good for</th></tr>
       <tr><td>Coalesce (default)</td><td>Run once now, skip the rest</td><td>Digests, reports, syncs</td></tr>
@@ -1199,34 +959,34 @@ WHERE run_id = ? AND state = 'dispatched'
       <g fill="var(--surface)" stroke="var(--muted)" stroke-width="1.3" stroke-dasharray="2 2"><circle cx="370" cy="70" r="5"/><circle cx="430" cy="70" r="5"/><circle cx="490" cy="70" r="5"/><circle cx="550" cy="70" r="5"/>
         <circle cx="370" cy="120" r="5"/><circle cx="430" cy="120" r="5"/><circle cx="490" cy="120" r="5"/><circle cx="550" cy="120" r="5"/>
         <circle cx="370" cy="170" r="5"/><circle cx="430" cy="170" r="5"/><circle cx="490" cy="170" r="5"/><circle cx="550" cy="170" r="5"/></g>
-      <g fill="var(--due)" stroke="var(--queue)" stroke-width="1.2"><circle cx="586" cy="70" r="6"/>
+      <g fill="var(--mark)" stroke="var(--queue)" stroke-width="1.2"><circle cx="586" cy="70" r="6"/>
         <circle cx="586" cy="120" r="4.5"/><circle cx="597" cy="120" r="4.5"/><circle cx="608" cy="120" r="4.5"/><circle cx="619" cy="120" r="4.5"/></g>
       <text class="s" x="586" y="92" text-anchor="middle">1 run</text><text class="s" x="602" y="142" text-anchor="middle">4 runs</text><text class="s" x="590" y="192" text-anchor="middle">none</text>
     </svg></div>
     <figcaption>Time runs left to right; each dot is one run and dashed circles are runs missed during the outage. The three policies differ only in what happens at recovery: one run, all four at once, or none.</figcaption></figure>
     <h3>Priority at the source, not only at the queue</h3>
-    <p>Ordering the queue by priority only helps among runs that have already reached it. At the peak the scheduler is the first queue: 30,000 runs fall due in one second, and if it dispatched them in arrival order, a critical run at the back of the batch would wait behind all the rest. So priority applies at each step: within a tick the scheduler writes its dispatch batches in priority order, the relay publishes high-priority outbox rows first, each priority has its own queue, and workers claim from the higher queues first. The runs for 09:00 already exist as pending rows long before the peak, because each was created when its predecessor was dispatched.</p>
+    <p data-req="FR3 NFR4">Ordering the queue by priority only helps among runs that have already reached it. At the peak the scheduler is the first queue: 30,000 runs fall due in one second, and if it dispatched them in arrival order, a critical run at the back of the batch would wait behind all the rest. So priority applies at each step: within a tick the scheduler writes its dispatch batches in priority order, the relay publishes high-priority outbox rows first, each priority has its own queue, and workers claim from the higher queues first. The runs for 09:00 already exist as pending rows long before the peak, because each was created when its predecessor was dispatched.</p>
     <p data-l="3">Strict priority starves low-priority work under sustained load. Use weighted claiming (for example 70/20/10 of capacity) or <strong>aging</strong>, which promotes a run once it passes its lag target.</p>
     <h3>Fairness between tenants</h3>
-    <p>If the ten largest tenants own 40% of all jobs, they own 40% of the 09:00 burst too. Use per-tenant queues or weighted fair claiming, plus concurrency caps per tenant and per destination endpoint, so the scheduler cannot overwhelm the endpoints it is calling.</p>
-    <p><strong>Quotas.</strong> Each tenant’s caps live in its <code>tenants</code> row: <code>max_concurrent_runs</code>, <code>per_endpoint_limit</code> and <code>rate_limit</code>. Defaults come from the <a href="#estimates">capacity estimates</a> (300 concurrent attempts, 50 concurrent calls per endpoint) and are raised per tenant on request, the way cloud service limits are, with <code>updated_at</code> recording when. The cap is enforced at the claim: before claiming, a worker takes a slot from the tenant’s counter (a counter row or a Redis semaphore), and gives it back with the result; slots expire with the attempt’s visibility timeout, so a dead worker does not leak them. With no slot free, the worker leaves the run <code>dispatched</code> and the queue redelivers it after a short delay. A tenant with one very chatty job can be allowed more than the default, and fair claiming makes that tenant wait for its own extra work instead of everyone else.</p>
+    <p data-req="FR5 NFR5">If the ten largest tenants own 40% of all jobs, they own 40% of the 09:00 burst too. Use per-tenant queues or weighted fair claiming, plus concurrency caps per tenant and per destination endpoint, so the scheduler cannot overwhelm the endpoints it is calling.</p>
+    <p data-req="NFR5"><strong>Quotas.</strong> Each tenant’s caps live in its <code>tenants</code> row: <code>max_concurrent_runs</code>, <code>per_endpoint_limit</code> and <code>rate_limit</code>. Defaults come from the <a href="#estimates">capacity estimates</a> (300 concurrent attempts, 50 concurrent calls per endpoint) and are raised per tenant on request, the way cloud service limits are, with <code>updated_at</code> recording when. The cap is enforced at the claim: before claiming, a worker takes a slot from the tenant’s counter (a counter row or a Redis semaphore), and gives it back with the result; slots expire with the attempt’s visibility timeout, so a dead worker does not leak them. With no slot free, the worker leaves the run <code>dispatched</code> and the queue redelivers it after a short delay. A tenant with one very chatty job can be allowed more than the default, and fair claiming makes that tenant wait for its own extra work instead of everyone else.</p>
     <div class="brief"><b>Brief: thundering herd.</b> Many clients acting at the same instant (all retrying, all reconnecting, all reloading) and overwhelming a shared resource. Jitter, rate limits and staggered work are the standard defences.</div>
   </div>
   <div data-l="3">
     <h3>A scheduler node failing at the peak</h3>
-    <p>Suppose one of 20 scheduler nodes dies at 08:59:59, holding a twentieth of the partitions and about 1,500 of the 30,000 runs due at 09:00:00 in its buffer. Nothing in memory is handed over. Its leases expire after the TTL (say 20 s); other nodes notice at their next claim attempt, a few seconds later, and claim them with higher epochs; each new owner polls, reloads and finds every one of those runs overdue. The affected runs are late by the TTL plus up to one claim interval plus one poll, about 25 s here, so the TTL alone is not the worst case. The new owners fire the overdue runs in priority order. Those 1,500 runs miss the lag target of their priority, which is the bounded delay NFR2 allows for the runs of a failed node; the other 28,500 keep their target. To shrink the window, lower the TTL (at the cost of more false expiries), and have a node that shuts down cleanly release its leases at once.</p>
+    <p data-req="NFR2">Suppose one of 20 scheduler nodes dies at 08:59:59, holding a twentieth of the partitions and about 1,500 of the 30,000 runs due at 09:00:00 in its buffer. Nothing in memory is handed over. Its leases expire after the TTL (say 20 s); other nodes notice at their next claim attempt, a few seconds later, and claim them with higher epochs; each new owner polls, reloads and finds every one of those runs overdue. The affected runs are late by the TTL plus up to one claim interval plus one poll, about 25 s here, so the TTL alone is not the worst case. The new owners fire the overdue runs in priority order. Those 1,500 runs miss the lag target of their priority, which is the bounded delay NFR2 allows for the runs of a failed node; the other 28,500 keep their target. To shrink the window, lower the TTL (at the cost of more false expiries), and have a node that shuts down cleanly release its leases at once.</p>
   </div>
   <div data-l="2">
     <h3>What to measure</h3>
     <ul>
-      <li><strong>Scheduling lag</strong> (actual start minus intended time: <code>started_at − scheduled_at</code>), as p50/p99 per priority. This is the single best health signal.</li>
+      <li data-req="NFR2"><strong>Scheduling lag</strong> (actual start minus intended time: <code>started_at − scheduled_at</code>), as p50/p99 per priority. This is the single best health signal.</li>
       <li>Dispatch lag (<code>dispatched_at − scheduled_at</code>), which tells a slow scheduler from a slow queue or too few workers.</li>
       <li>Age of the oldest outbox row: a stopped relay shows here first.</li>
       <li>Pending backlog per partition and per tenant.</li>
       <li>Lease churn: claims and expirations per minute. A spike means nodes are flapping.</li>
       <li>Retry rate, DLQ inflow, reaper resets, sweeper resets, and series repairs (which should be zero).</li>
       <li>Replication lag per shard: it is the size of the loss window a database failover would cause right now.</li>
-      <li>Duplicate deliveries, measured on the receiving side via repeated idempotency keys.</li>
+      <li data-req="NFR3">Duplicate deliveries, measured on the receiving side via repeated idempotency keys.</li>
     </ul>
   </div>
 </section>
@@ -1239,7 +999,7 @@ WHERE run_id = ? AND state = 'dispatched'
   <div data-l="2">
     <div class="brief"><b>Brief: <code>FOR UPDATE SKIP LOCKED</code>.</b> <code>FOR UPDATE</code> locks the rows a query returns until the transaction ends. <code>SKIP LOCKED</code> makes the query pass over rows another transaction already holds instead of waiting for them. Several workers running the same query at the same moment therefore get disjoint sets of rows. Postgres and MySQL 8 both support it.</div>
     <p>Every worker runs the same short transaction:</p>
-<pre><code>SELECT run_id FROM runs
+<pre data-lang="sql"><code>SELECT run_id FROM runs
 WHERE state = 'pending' AND next_attempt_at &lt;= now()
 ORDER BY priority, next_attempt_at       -- priority is a rank: critical 0 … low 3
 LIMIT 100
@@ -1249,7 +1009,7 @@ UPDATE runs SET state = 'running', worker_id = ?, attempt = attempt + 1,
        started_at = now(), heartbeat_deadline = now() + interval '5 minutes'
 WHERE run_id IN (...);
 COMMIT;  -- before doing any work</code></pre>
-    <p>Commit before calling anything, so row locks last milliseconds. A reaper handles rows whose <code>heartbeat_deadline</code> has passed, as in <a href="#dispatch">dispatch queue and workers</a>. Results are fenced on <code>attempt</code> exactly as in <a href="#dispatch">dispatch queue and workers</a>. Because state and queue are the same rows, the crash window between database and queue from component 4 does not exist here.</p>
+    <p data-req="NFR1 NFR3">Commit before calling anything, so row locks last milliseconds. A reaper handles rows whose <code>heartbeat_deadline</code> has passed, as in <a href="#dispatch">dispatch queue and workers</a>. Results are fenced on <code>attempt</code> exactly as in <a href="#dispatch">dispatch queue and workers</a>. Because state and queue are the same rows, the crash window between database and queue from component 4 does not exist here.</p>
   </div>
   <figure><div class="rows">
     <div class="a">r_101<i style="font-style:normal">09:00:00</i><span>locked by worker A</span></div>
@@ -1284,281 +1044,31 @@ COMMIT;  -- before doing any work</code></pre>
   <h3>How to cite this page</h3>
   <p class="cite">“Building a distributed job scheduler.” System design walkthrough, November 2026. <span id="citeurl"><a href="https://dhorbach.github.io/system-design/distributed-job-scheduler.html" target="_blank" rel="noopener">https://dhorbach.github.io/system-design/distributed-job-scheduler.html</a></span></p>
 </section>
-</main>
-</div>
+
+<dl id="glossary" hidden>
+  <dt data-match="transactional outbox|\boutbox\b">Transactional outbox</dt><dd>Writing an event row in the same transaction as the state change, published later by a relay.</dd>
+  <dt data-match="dead-letter queue|\bDLQ\b">Dead-letter queue (DLQ)</dt><dd>Runs that exhausted their retries, kept for inspection and manual retry.</dd>
+  <dt data-match="visibility timeout">Visibility timeout</dt><dd>Deadline after which a claimed but unfinished run becomes claimable again.</dd>
+  <dt data-match="idempotency keys?">Idempotency key</dt><dd>Unique id per run, sent on every attempt, letting the receiver ignore repeats.</dd>
+  <dt data-match="\bidempoten(t|cy)\b">Idempotent</dt><dd>An operation is idempotent if doing it twice has the same effect as doing it once.</dd>
+  <dt data-match="fencing tokens?|\bfenc(ing|ed)\b">Fencing token</dt><dd>Increasing number attached to writes so storage can reject writes from stale owners.</dd>
+  <dt data-match="misfire polic(y|ies)">Misfire policy</dt><dd>What to do with runs whose time passed while the system was down.</dd>
+  <dt data-match="scheduling lag">Scheduling lag</dt><dd>Time a worker starts the run (its claim) minus the intended time; the key health metric.</dd>
+  <dt data-match="\blookahead\b">Lookahead window</dt><dd>How far ahead the scheduler loads due runs into memory (for example 30 s).</dd>
+  <dt data-match="timing wheels?">Timing wheel</dt><dd>Circular array of time slots for holding many timers with O(1) insert and fire.</dd>
+  <dt data-match="at-least-once">At-least-once</dt><dd>Every run executes one or more times; never zero.</dd>
+  <dt data-match="SKIP LOCKED" data-case data-code>SKIP LOCKED</dt><dd>SQL clause that skips rows locked by others, letting many workers claim disjoint rows.</dd>
+  <dt data-match="\breaper\b|\bsweeper\b">Reaper / sweeper</dt><dd>Background process that resets abandoned or stuck runs to pending.</dd>
+  <dt data-match="\bheartbeats?\b">Heartbeat</dt><dd>Periodic “still alive” signal: a node’s renewal of its lease, or a worker’s extension of its visibility timeout.</dd>
+  <dt data-match="\bpartitions?\b">Partition</dt><dd>Fixed slice of the job space, owned by one scheduler node at a time.</dd>
+  <dt data-match="\bcoalesce\b">Coalesce</dt><dd>After an outage, create one run for the job instead of one per missed slot.</dd>
+  <dt data-match="\bjitter\b">Jitter</dt><dd>Random spread added to retry delays so retries don’t synchronize.</dd>
+  <dt data-match="\bepochs?\b">Epoch</dt><dd>A counter on a lease, incremented on every change of owner; used as the fencing token.</dd>
+  <dt data-match="\bleases?\b">Lease</dt><dd>A lock that expires unless renewed.</dd>
+</dl>
 
 <script>
-(function(){
-const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
-const NAMES={1:'Overview',2:'Mechanics',3:'Full detail'};
-const secs=$$('main section'), toc=$('#toc'), side=$('#side'), scrim=$('#scrim'), menu=$('#menu');
-let depth=2, active=null;
-try{const s=+localStorage.getItem('sched-depth'); if(s>=1&&s<=3) depth=s;}catch(e){}
-
-/* build per-section chrome */
-secs.forEach((sec,i)=>{
-  const k=[...sec.classList].find(c=>c.startsWith('k-'))||'';
-  const li=document.createElement('li');
-  li.innerHTML='<a class="'+k+'" href="#'+sec.id+'"><span class="chip">'+(sec.dataset.num||'')+'</span><span>'+sec.dataset.toc+'</span></a><ol></ol>';
-  if(sec.dataset.group){ const g=document.createElement('li'); g.className='grp'; g.textContent=sec.dataset.group; toc.appendChild(g); }
-  if(sec.dataset.sub) li.classList.add('sub');
-  toc.appendChild(li); sec._li=li;
-  $$('h3',sec).forEach((h,j)=>{h.id=sec.id+'-'+(j+1);});
-  if(sec.dataset.more2||sec.dataset.more3){
-    const seg=document.createElement('div'); seg.className='seg'; seg.setAttribute('role','group'); seg.setAttribute('aria-label','Depth for this part');
-    seg.innerHTML=[1,2,3].map(n=>'<button data-d="'+n+'" title="'+NAMES[n]+'" aria-label="'+NAMES[n]+' for this part"><b>'+n+'</b></button>').join('');
-    seg.addEventListener('click',e=>{const b=e.target.closest('button'); if(b) setSec(sec,+b.dataset.d,true);});
-    $('.sh',sec).appendChild(seg); sec._seg=seg;
-    const m=document.createElement('div'); m.className='more'; sec.appendChild(m); sec._more=m;
-  }
-  const pn=document.createElement('div'); pn.className='pn';
-  const p=secs[i-1], n=secs[i+1];
-  pn.innerHTML=(p?'<a href="#'+p.id+'">Previous: '+p.dataset.toc+'</a>':'<span></span>')+(n?'<a href="#'+n.id+'">Next: '+n.dataset.toc+'</a>':'');
-  sec.appendChild(pn);
-});
-
-function paintSec(sec){
-  const d=+sec.dataset.depth;
-  sec._li.dataset.d=d; sec._li.firstChild.dataset.diff=(sec._seg&&d!==depth)?'depth '+d:'';
-  if(sec._seg) $$('button',sec._seg).forEach(b=>b.setAttribute('aria-pressed',String(+b.dataset.d===d)));
-  if(sec._more){
-    let nx=0; for(let n=d+1;n<=3;n++){ if(sec.dataset['more'+n]){nx=n;break;} }
-    sec._more.hidden=!nx;
-    if(nx){ sec._more.innerHTML='<span>'+NAMES[nx]+' adds '+sec.dataset['more'+nx]+'.</span><button>Show '+NAMES[nx].toLowerCase()+' for this part</button>';
-      $('button',sec._more).onclick=()=>setSec(sec,nx,true); }
-  }
-  const ol=$('ol',sec._li); ol.innerHTML='';
-  $$('h3',sec).forEach(h=>{ if(h.offsetParent===null) return; const li=document.createElement('li'); li.innerHTML='<a href="#'+h.id+'"></a>'; li.firstChild.textContent=h.textContent; ol.appendChild(li); });
-}
-function keep(fn){
-  const a=active||secs[0], y=a.getBoundingClientRect().top; fn();
-  window.scrollBy(0,a.getBoundingClientRect().top-y); spy();
-}
-function setSec(sec,d,anchor){
-  const go=()=>{sec.dataset.depth=d; paintSec(sec);};
-  if(anchor){ const y=sec.getBoundingClientRect().top; go(); window.scrollBy(0,sec.getBoundingClientRect().top-y); spy(); } else go();
-}
-function setAll(d,anchor){
-  depth=d; try{localStorage.setItem('sched-depth',String(d));}catch(e){}
-  const go=()=>secs.forEach(s=>setSec(s,d,false));
-  anchor?keep(go):go();
-  $$('#gseg button,#pick button').forEach(b=>b.setAttribute('aria-pressed',String(+b.dataset.d===d)));
-}
-$('#gseg').addEventListener('click',e=>{const b=e.target.closest('button'); if(b) setAll(+b.dataset.d,true);});
-$('#pick').addEventListener('click',e=>{const b=e.target.closest('button'); if(b) setAll(+b.dataset.d,false);});
-document.addEventListener('keydown',e=>{
-  if(e.target.matches('input,textarea,select')||e.metaKey||e.ctrlKey||e.altKey) return;
-  if(e.key>='1'&&e.key<='3') setAll(+e.key,true);
-  if(e.key==='Escape') drawer(false);
-});
-
-/* reading time per depth */
-(function(){
-  const w=[0,0,0,0];
-  secs.filter(s=>!s.dataset.ref).forEach(s=>{
-    const tw=document.createTreeWalker(s,NodeFilter.SHOW_TEXT); let n;
-    while(n=tw.nextNode()){
-      const el=n.parentElement; if(!el||el.closest('.more,.pn,.seg,svg')) continue;
-      let lv=1, a=el.closest('[data-l]'); while(a){lv=Math.max(lv,+a.dataset.l); a=a.parentElement&&a.parentElement.closest('[data-l]');}
-      const c=(n.nodeValue.trim().match(/\S+/g)||[]).length; for(let d=lv;d<=3;d++) w[d]+=c;
-    }
-  });
-  $$('#pick button').forEach(b=>{ $('em',b).textContent='About '+Math.max(1,Math.round(w[+b.dataset.d]/220))+' min'; });
-})();
-
-/* navigation */
-function goTo(id,push){
-  const el=document.getElementById(id); if(!el) return;
-  el.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion:reduce)').matches?'auto':'smooth',block:'start'});
-  const sec=el.closest('section');
-  if(push&&sec&&el===sec){ try{history.replaceState(null,'','#'+id);}catch(e){location.hash=id;} }
-  drawer(false);
-}
-document.addEventListener('click',e=>{
-  const a=e.target.closest('a[href^="#"]'); if(!a) return;
-  const id=(a.getAttribute('href')||'').slice(1); if(!document.getElementById(id)) return;
-  e.preventDefault(); goTo(id,true);
-});
-$$('.minimap .n').forEach(g=>{
-  const f=()=>goTo(g.dataset.go,true);
-  g.addEventListener('click',f); g.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();f();}});
-});
-function drawer(o){ side.classList.toggle('open',o); scrim.classList.toggle('open',o); menu.setAttribute('aria-expanded',String(o)); }
-menu.addEventListener('click',()=>drawer(!side.classList.contains('open')));
-scrim.addEventListener('click',()=>drawer(false));
-
-/* scroll spy */
-let tick=false;
-function spy(){
-  tick=false;
-  const top=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bar'))+40;
-  let cur=null; secs.forEach(s=>{ if(s.getBoundingClientRect().top<=top) cur=s; });
-  if(cur!==active){
-    active=cur;
-    secs.forEach(s=>{ s._li.classList.toggle('open',s===cur); s._li.firstChild.classList.toggle('cur',s===cur); });
-    const on=cur?(cur.dataset.nodes||'').split(' '):[];
-    $$('.minimap .n').forEach(g=>g.classList.toggle('on',on.includes(g.dataset.node)));
-    if(cur&&side.scrollHeight>side.clientHeight) cur._li.scrollIntoView({block:'nearest'});
-  }
-  if(cur){ let h=null; $$('h3',cur).forEach(x=>{ if(x.offsetParent!==null&&x.getBoundingClientRect().top<=top) h=x; });
-    $$(':scope > ol a',cur._li).forEach(a=>a.classList.toggle('cur',!!h&&a.getAttribute('href')==='#'+h.id)); }
-  const max=document.documentElement.scrollHeight-innerHeight;
-  $('#prog').style.width=(max>0?Math.min(100,scrollY/max*100):0)+'%';
-}
-addEventListener('scroll',()=>{ if(!tick){tick=true; requestAnimationFrame(spy);} },{passive:true});
-addEventListener('resize',spy);
-
-/* inline term definitions */
-(function(){
-  const T=[
-    ['Transactional outbox',/transactional outbox|\boutbox\b/i,'Writing an event row in the same transaction as the state change, published later by a relay.'],
-    ['Dead-letter queue (DLQ)',/dead-letter queue|\bDLQ\b/i,'Runs that exhausted their retries, kept for inspection and manual retry.'],
-    ['Visibility timeout',/visibility timeout/i,'Deadline after which a claimed but unfinished run becomes claimable again.'],
-    ['Idempotency key',/idempotency keys?/i,'Unique id per run, sent on every attempt, letting the receiver ignore repeats.'],
-    ['Idempotent',/\bidempoten(t|cy)\b/i,'An operation is idempotent if doing it twice has the same effect as doing it once.'],
-    ['Fencing token',/fencing tokens?|\bfenc(ing|ed)\b/i,'Increasing number attached to writes so storage can reject writes from stale owners.'],
-    ['Misfire policy',/misfire polic(y|ies)/i,'What to do with runs whose time passed while the system was down.'],
-    ['Scheduling lag',/scheduling lag/i,'Time a worker starts the run (its claim) minus the intended time; the key health metric.'],
-    ['Lookahead window',/\blookahead\b/i,'How far ahead the scheduler loads due runs into memory (for example 30 s).'],
-    ['Timing wheel',/timing wheels?/i,'Circular array of time slots for holding many timers with O(1) insert and fire.'],
-    ['At-least-once',/at-least-once/i,'Every run executes one or more times; never zero.'],
-    ['SKIP LOCKED',/SKIP LOCKED/,'SQL clause that skips rows locked by others, letting many workers claim disjoint rows.',true],
-    ['Reaper / sweeper',/\breaper\b|\bsweeper\b/i,'Background process that resets abandoned or stuck runs to pending.'],
-    ['Heartbeat',/\bheartbeats?\b/i,'Periodic “still alive” signal: a node’s renewal of its lease, or a worker’s extension of its visibility timeout.'],
-    ['Partition',/\bpartitions?\b/i,'Fixed slice of the job space, owned by one scheduler node at a time.'],
-    ['Coalesce',/\bcoalesce\b/i,'After an outage, create one run for the job instead of one per missed slot.'],
-    ['Jitter',/\bjitter\b/i,'Random spread added to retry delays so retries don’t synchronize.'],
-    ['Epoch',/\bepochs?\b/i,'A counter on a lease, incremented on every change of owner; used as the fencing token.'],
-    ['Lease',/\bleases?\b/i,'A lock that expires unless renewed.']
-  ];
-  const tip=document.createElement('div'); tip.id='tip'; tip.setAttribute('role','tooltip'); tip.hidden=true; document.body.appendChild(tip);
-  function show(b){
-    const t=T[+b.dataset.t]; tip.innerHTML='<b></b><span></span>'; tip.firstChild.textContent=t[0]; tip.lastChild.textContent=t[2]; tip.hidden=false;
-    const r=b.getBoundingClientRect(), w=tip.offsetWidth, h=tip.offsetHeight;
-    let y=r.bottom+8; if(y+h>innerHeight-10) y=Math.max(10,r.top-h-8);
-    tip.style.left=Math.max(10,Math.min(r.left,innerWidth-w-10))+'px'; tip.style.top=y+'px';
-  }
-  function hide(){ tip.hidden=true; }
-  secs.forEach(sec=>{ [...sec.children].forEach(block=>{
-    const used=new Set(), nodes=[], tw=document.createTreeWalker(block,NodeFilter.SHOW_TEXT); let n;
-    $$('.brief>b:first-child',block).forEach(b=>T.forEach((t,i)=>{ if(t[1].test(b.textContent)) used.add(i); }));
-    while(n=tw.nextNode()) nodes.push(n);
-    nodes.forEach(node=>{
-      const el=node.parentElement;
-      if(!el||!el.closest('p,li,td,figcaption,.brief')||el.closest('a,button,pre,h2,h3,svg,.more,.pn,.ctl')) return;
-      const inCode=!!el.closest('code'), nt=el.closest('[data-noterm]'), ban=nt?nt.dataset.noterm.split('|'):[];
-      while(node){
-        let best=null;
-        T.forEach((t,i)=>{ if(used.has(i)||(inCode&&!t[3])||ban.includes(t[0])) return; const m=t[1].exec(node.nodeValue); if(m&&(!best||m.index<best.m.index)) best={m,i}; });
-        if(!best) break;
-        const mid=node.splitText(best.m.index), rest=mid.splitText(best.m[0].length);
-        const b=document.createElement('button'); b.type='button'; b.className='term'; b.dataset.t=best.i; b.setAttribute('aria-describedby','tip');
-        mid.parentNode.replaceChild(b,mid); b.appendChild(mid); used.add(best.i); node=rest;
-      }
-    });
-  });});
-  const term=e=>e.target.closest?e.target.closest('.term'):null;
-  document.addEventListener('mouseover',e=>{const b=term(e); if(b) show(b);});
-  document.addEventListener('mouseout',e=>{const b=term(e); if(b&&document.activeElement!==b) hide();});
-  document.addEventListener('focusin',e=>{const b=term(e); if(b) show(b);});
-  document.addEventListener('focusout',e=>{ if(term(e)) hide(); });
-  document.addEventListener('click',e=>{const b=term(e); b?show(b):hide();});
-  addEventListener('scroll',hide,{passive:true});
-})();
-
-/* basic syntax colouring for code blocks */
-(function(){
-  const KW={go:'package import type struct func return if else for select case defer var range chan map go'.split(' '),
-            sql:'SELECT FROM WHERE AND OR UPDATE SET ORDER BY LIMIT FOR SKIP LOCKED IN COMMIT UNIQUE'.split(' '),json:[]};
-  const RE={
-    go:/(\/\/[^\n]*)|("(?:[^"\\\n]|\\.)*")(\s*:)?|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_]\w*)\b/g,
-    sql:/(--[^\n]*)|('(?:[^'\\\n]|\\.)*')(\s*:)?|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_]\w*)\b/g,
-    json:/(#[^\n]*)|("(?:[^"\\\n]|\\.)*")(\s*:)?|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_]\w*)\b/g};
-  const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  $$('pre code').forEach(c=>{
-    const t=c.textContent, lang=/^package /.test(t)?'go':/^\s*(SELECT|UPDATE)\b/.test(t)?'sql':'json', re=RE[lang];
-    let out='', i=0, m; re.lastIndex=0;
-    while(m=re.exec(t)){
-      out+=esc(t.slice(i,m.index)); i=re.lastIndex;
-      if(m[1]) out+='<span class="tc">'+esc(m[1])+'</span>';
-      else if(m[2]) out+='<span class="'+(lang==='json'&&m[3]?'tk':'ts')+'">'+esc(m[2])+'</span>'+(m[3]||'');
-      else if(m[4]) out+='<span class="tn">'+m[4]+'</span>';
-      else out+=KW[lang].includes(m[5])?'<span class="tw">'+m[5]+'</span>':m[5];
-    }
-    c.innerHTML=out+esc(t.slice(i));
-  });
-})();
-
-/* requirement ids and references */
-(function(){
-  const names={};
-  $$('#requirements > ul').slice(0,2).forEach((ul,u)=>{ [...ul.children].forEach((li,i)=>{
-    const id=(u?'NFR':'FR')+(i+1); li.id=id.toLowerCase(); names[id]=$('strong',li).textContent.replace(/\.$/,'');
-    const b=document.createElement('span'); b.className='rid'; b.textContent=id; li.insertBefore(b,li.firstChild);
-  });});
-  const R=[
-    ['estimates','are due in the same second','NFR4'],
-    ['estimates','Priority and fairness decide which ones','NFR4 NFR5'],
-    ['api','A request is accepted only once','FR2 NFR1'],
-    ['api','A one-off job sends','FR1'],
-    ['api','inserts the job row and its first pending run','NFR1'],
-    ['api','replaces the job’s next run in the same transaction','FR3'],
-    ['api','moves its pending runs to the','FR2'],
-    ['api','stops one run that has not finished','FR2'],
-    ['api','resets the same dead run to pending','FR4'],
-    ['api','derives the tenant from the authenticated caller','FR5'],
-    ['job-store','single source of truth: every other component','NFR1'],
-    ['job-store','copy the spec, timeout and retry policy','FR3'],
-    ['job-store','a crash can delay the series but never break it','FR1 NFR1'],
-    ['job-store','applies its copied','FR1 FR3'],
-    ['job-store','every active cron job has exactly one pending run','FR1 NFR1'],
-    ['job-store','This design uses asynchronous replication','NFR1'],
-    ['job-store','failover refuses to promote a replica that lags','NFR1'],
-    ['job-store','a stale write is never accepted','NFR3'],
-    ['scheduler','every run must be covered by exactly one machine','NFR2 NFR3'],
-    ['scheduler','Zero rows affected means the run is no longer','NFR3'],
-    ['scheduler','One query per partition per second, however many jobs','NFR2'],
-    ['scheduler','insert the next run in the same transaction as the update','FR1'],
-    ['scheduler','fire late but still fire','NFR1 NFR2'],
-    ['timing-wheel','fire each run within one tick of its due time','NFR2'],
-    ['timing-wheel','let it fire and fail the conditional update','FR2'],
-    ['timing-wheel','A new owner repolls and rebuilds it','NFR1'],
-    ['dispatch','a slow run can never delay scheduling','NFR2'],
-    ['dispatch','so a bulk backlog cannot hold up urgent work','FR3 NFR5'],
-    ['dispatch','heartbeats stop, the deadline passes','NFR1'],
-    ['dispatch','cannot corrupt the newer attempt','NFR3'],
-    ['dispatch','prefer the duplicate','NFR3'],
-    ['dispatch','so nothing can be lost','NFR1'],
-    ['dispatch','It catches whatever slips through every other mechanism','NFR1'],
-    ['correctness','makes duplicates harmless with','NFR3'],
-    ['correctness','A repeated key returns the stored result','NFR3'],
-    ['correctness','Retry failures with','FR4'],
-    ['correctness','synchronized waves that hit','NFR4'],
-    ['correctness','kept for a fixed window (for example 14 days)','FR4'],
-    ['load','judged by its peaks','NFR4'],
-    ['load','Make it a per-job setting','FR3'],
-    ['load','So priority applies at each step','FR3 NFR4'],
-    ['load','The cap is enforced at the claim','NFR5'],
-    ['load','Use per-tenant queues or weighted fair claiming','FR5 NFR5'],
-    ['load','so the TTL alone is not the worst case','NFR2'],
-    ['load','This is the single best health signal','NFR2'],
-    ['load','measured on the receiving side','NFR3'],
-    ['simple-design','Commit before calling anything','NFR1 NFR3']
-  ];
-  R.forEach(r=>{
-    const sec=document.getElementById(r[0]); if(!sec) return;
-    const el=$$('p,li,.brief',sec).find(e=>e.textContent.includes(r[1])); if(!el) return;
-    r[2].split(' ').forEach(id=>{ if(!names[id]) return;
-      const a=document.createElement('a'); a.className='req'; a.href='#'+id.toLowerCase(); a.textContent=id; a.title=id+': '+names[id];
-      a.setAttribute('aria-label','Implements requirement '+id+': '+names[id]); el.appendChild(a); });
-  });
-  document.addEventListener('click',e=>{
-    const a=e.target.closest('a.req'); if(!a) return;
-    const li=document.getElementById(a.getAttribute('href').slice(1));
-    if(li){ li.classList.add('rflash'); setTimeout(()=>li.classList.remove('rflash'),1800); }
-  });
-})();
-
+document.addEventListener('guide:ready',({detail:{$}})=>{
 /* partition ownership demo */
 (function(){
   const base=[['A',4],['A',2],['A',3],['A',1],['B',7],['B',2],['B',5],['B',3],['C',2],['C',6],['C',1],['C',4]];
@@ -1576,27 +1086,6 @@ addEventListener('resize',spy);
     down=!down; draw();
   });
   draw();
-})();
-
-/* worker race timeline */
-(function(){
-  const svg=$('#race'); if(!svg) return;
-  const steps=$$('g[data-s]',svg), cap=$('#racecap'), base=cap.textContent, n=steps.length, play=$('#rplay');
-  const T=['Worker A receives the run from the queue and claims it. The claim matches only a run still in dispatched, and raises attempt from 2 to 3. A remembers 3.',
-    'While it executes the run, A heartbeats every few seconds. Each heartbeat pushes heartbeat_deadline forward, but only for attempt 3.',
-    'A freezes, for example in a long garbage-collection pause. Its heartbeats stop and heartbeat_deadline passes.',
-    'The reaper resets the run to pending. Its WHERE clause repeats what it saw: still running, still attempt 3, deadline passed. Had A heartbeated a moment earlier, the reset would have matched no rows.',
-    'The run is dispatched again and worker B claims it, raising attempt to 4.',
-    'A wakes up and writes its result with attempt 3. The row is on attempt 4, so the write matches no rows. A learns it lost the run and discards its result.',
-    'B finishes and writes succeeded with attempt 4. Only the latest claim can finish the run.'];
-  let cur=n, timer=null;
-  function show(k){ cur=k; steps.forEach(g=>g.classList.toggle('off',+g.dataset.s>k)); cap.textContent=cap.dataset.all?base:T[k-1]; }
-  function stop(){ clearInterval(timer); timer=null; play.textContent='Play'; }
-  play.addEventListener('click',()=>{ if(timer){stop();return;} delete cap.dataset.all; if(cur>=n) show(1); else show(cur+1);
-    play.textContent='Pause'; timer=setInterval(()=>{ if(cur>=n){stop();return;} show(cur+1); },2200); });
-  $('#rstep').addEventListener('click',()=>{ stop(); delete cap.dataset.all; show(cur>=n?1:cur+1); });
-  $('#rall').addEventListener('click',()=>{ stop(); cap.dataset.all='1'; show(n); });
-  cap.dataset.all='1';
 })();
 
 /* timing wheel */
@@ -1621,20 +1110,6 @@ addEventListener('resize',spy);
   pp.addEventListener('click',()=>{run=!run; pp.textContent=run?'Pause':'Play';});
   [2,5,5,9,17,27].forEach(add); setInterval(step,900);
 })();
-
-/* citation address: filled in when the page is served from its own site */
-(function(){
-  let own=false; try{ own=window.top===window.self; }catch(e){}
-  if(own&&/^https?:$/.test(location.protocol)){
-    const u=location.origin+location.pathname, a=document.createElement('a'); a.href=u; a.textContent=u; $('#citeurl').replaceWith(a);
-  }
-})();
-
-/* init + hash routing */
-setAll(depth,false);
-function route(){ const id=location.hash.slice(1); if(id&&secs.some(s=>s.id===id)) document.getElementById(id).scrollIntoView({block:'start'}); spy(); }
-addEventListener('hashchange',route);
-route();
-})();
+});
 </script>
 </body>

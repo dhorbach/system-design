@@ -11,7 +11,7 @@ Run the helper from this skill's `scripts/` directory before judging:
 - `python3 levels.py SOURCE.html` prints, per section, the words, tables, figures, code blocks and headings at each level, the `data-more2` and `data-more3` descriptions, and structural flags.
 - `python3 levels.py SOURCE.html --level 1` (then `--level 2`) prints the text a reader sees at that depth. Text is grouped by level inside each section, so check the source when reading order matters.
 
-Take the meaning of each level from the page itself (the depth picker usually states it). If the page gives none, use: level 1 is what the part is for and the one idea behind it; level 2 is how it works, with every term explained; level 3 is exact detail such as code, SQL, example data, edge cases and tuning.
+Take the meaning of each level from the page itself (the depth picker usually states it; on this site its text for levels 1 and 2 is in `templates/guide.html` and for level 3 in the page's `<meta name="depth-3">`). If the page gives none, use: level 1 is what the part is for and the one idea behind it; level 2 is how it works, with every term explained; level 3 is exact detail such as code, SQL, example data, edge cases and tuning.
 
 ## Check
 

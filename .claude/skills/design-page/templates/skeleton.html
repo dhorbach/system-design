@@ -1,0 +1,276 @@
+<head>
+<meta name="layout" content="guide">
+<title>Building a TODO</title>
+<meta name="short-title" content="TODO name without “Building a”">
+<meta name="description" content="TODO one or two sentences, under 160 characters: what the system does and what the guide covers.">
+<meta name="depth-3" content="TODO what Full detail holds here, for example: SQL, example rows, edge cases, tuning and a Go implementation.">
+<style>
+/* component colours: one shared hue each (teal, indigo, amber, rose, violet, green, slate) */
+:root{--api:var(--slate);--store:var(--indigo);--todo:var(--teal)}
+.k-api{--k:var(--api)} .k-store{--k:var(--store)} .k-todo{--k:var(--todo)}
+/* TODO styles for components only this page has, or delete this line */
+</style>
+</head>
+<body>
+<template data-slot="map">
+  <svg class="minimap" viewBox="0 0 224 92" role="group" aria-label="System map. Select a component to jump to its part of the guide.">
+    <path class="wire" marker-end="url(#ah)" d="M102 17H121"/>
+    <path class="wire" marker-end="url(#ah)" d="M172 32V59"/>
+    <g class="n k-api" data-node="api" data-go="api" tabindex="0" role="link" aria-label="API service"><rect x="2" y="2" width="100" height="30" rx="7"/><text x="52" y="17">API</text></g>
+    <g class="n k-store" data-node="store" data-go="store" tabindex="0" role="link" aria-label="TODO store"><rect x="122" y="2" width="100" height="30" rx="7"/><text x="172" y="17">Store</text></g>
+    <g class="n k-todo" data-node="todo" data-go="todo" tabindex="0" role="link" aria-label="TODO component"><rect x="122" y="60" width="100" height="30" rx="7"/><text x="172" y="75">TODO</text></g>
+  </svg>
+</template>
+
+<section id="overview" data-toc="Problem" data-group="Framing" data-nodes="">
+  <div class="sh"><h2>Problem</h2></div>
+  <p class="lede">TODO one paragraph: what the system does, with two concrete examples in brackets, for whom, and what makes it hard. Nothing about the guide itself.</p>
+</section>
+
+<section id="terms" data-toc="Terminology" data-nodes=""
+  data-more2="TODO how the terms relate, with one example counted through"
+  data-more3="TODO the neighbouring words the guide keeps for other things">
+  <div class="sh"><h2>Terminology</h2></div>
+  <p>TODO one sentence: why these words need one meaning each (the requirements and guarantees below are stated in them).</p>
+  <div class="scroll"><table>
+    <tr><th>Term</th><th>Meaning</th><th>Example</th></tr>
+    <tr id="term-todo-a"><td><strong>TODO A</strong></td><td>What a client creates. TODO what it is and what it is not.</td><td>TODO</td></tr>
+    <tr id="term-todo-b"><td><strong>TODO B</strong></td><td>What the system produces and tracks. TODO how it relates to A.</td><td>TODO</td></tr>
+    <tr id="term-todo-c"><td><strong>TODO C</strong></td><td>The unit of work. TODO how it relates to B.</td><td>TODO</td></tr>
+  </table></div>
+  <div data-l="2">
+    <h3>How they relate</h3>
+    <p>TODO cardinalities in plain words (one A has many B; a B has one or more C), then one example with numbers counted through, then where each lives in the data model.</p>
+  </div>
+  <div data-l="3">
+    <h3>Neighbouring words</h3>
+    <ul>
+      <li><strong>TODO verb or near-synonym</strong> TODO the one thing this guide uses it for, and what it is never used for.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="requirements" data-toc="Requirements" data-nodes=""
+  data-more2="a one-line explanation of each requirement, and what is out of scope"
+  data-more3="the precise guarantee behind each requirement, with links to the section that delivers it">
+  <div class="sh"><h2>Requirements</h2></div>
+  <p>Each ID reappears as a tag wherever the design implements that requirement.</p>
+  <h3>Functional requirements</h3>
+  <ul data-reqs="FR">
+    <li><strong>TODO title.</strong><span data-l="2"> TODO one line: what a client can do.</span><span data-l="3"> TODO the precise guarantee, as something a client can observe (<a href="#api">API service</a>).</span></li>
+  </ul>
+  <h3>Non-functional requirements</h3>
+  <ul data-reqs="NFR">
+    <li><strong>TODO title.</strong><span data-l="2"> TODO one line with the number: a latency, a rate, a recovery time, a retention period.</span><span data-l="3"> TODO the exact bound and its one exception, without naming any mechanism (<a href="#store">TODO section</a>).</span></li>
+  </ul>
+  <div data-l="2">
+    <h3>Out of scope</h3>
+    <ul>
+      <li><strong>TODO a variant of the problem left out.</strong> TODO one sentence on what the design assumes instead.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="estimates" data-toc="Capacity estimates" data-nodes=""
+  data-more2="TODO the assumptions, the working behind each number and what the numbers mean for the design"
+  data-more3="TODO the secondary numbers">
+  <div class="sh"><h2>Back-of-the-envelope estimates</h2></div>
+  <p class="lede">TODO what is being sized and why, before any number. Then the one number that drives the design.</p>
+  <p>The table shows the results for TODO which size of system; Mechanics adds the assumptions and the working.</p>
+  <div class="scroll"><table>
+    <tr><th>Estimate</th><th>Result</th></tr>
+    <tr><td>TODO quantity</td><td>TODO about N per second</td></tr>
+  </table></div>
+  <div data-l="2">
+    <h3>Assumptions</h3>
+    <div class="scroll"><table>
+      <tr><th>Assumption</th><th>Value</th></tr>
+      <tr><td>TODO input</td><td>TODO value</td></tr>
+    </table></div>
+    <h3>Traffic</h3>
+    <div class="formula">TODO label: 2,000 × 1,440 = 2,880,000 per day<br>total: 2,880,000 per day ÷ 86,400 s ≈ 33 per second</div>
+    <p>TODO what stands out in that working.</p>
+    <h3>What the numbers say</h3>
+    <ul>
+      <li><strong>TODO a design decision.</strong> TODO the number that forces it.</li>
+    </ul>
+  </div>
+  <div data-l="3">
+    <h3>TODO secondary numbers</h3>
+    <div class="formula">TODO label: 256 ÷ 5 s ≈ 50 writes/s</div>
+    <p>TODO what follows.</p>
+  </div>
+</section>
+
+<section id="system" data-toc="High-level design" data-nodes="api store todo">
+  <div class="sh"><h2>High-level design</h2></div>
+  <p class="lede">TODO the split into parts, and why the parts are separate.</p>
+  <figure><div class="scroll"><svg viewBox="-2 0 532 120" style="min-width:460px;max-width:620px;margin:0 auto" role="img" aria-label="Architecture: TODO say in words what connects to what.">
+    <path class="wire" marker-end="url(#ah)" d="M140 58H192"/><text class="s" x="166" y="50" text-anchor="middle">writes</text>
+    <path class="wire" marker-end="url(#ah)" d="M333 58H386"/><text class="s" x="360" y="50" text-anchor="middle">TODO</text>
+    <a href="#api" class="k-api"><rect class="box" x="0" y="30" width="140" height="56" rx="9"/><text class="t" x="70" y="53" text-anchor="middle">API service</text><text class="s" x="70" y="71" text-anchor="middle">TODO verbs</text></a>
+    <a href="#store" class="k-store"><rect class="box" x="193" y="30" width="140" height="56" rx="9"/><text class="t" x="263" y="53" text-anchor="middle">TODO store</text><text class="s" x="263" y="71" text-anchor="middle">TODO what it holds</text></a>
+    <a href="#todo" class="k-todo"><rect class="box" x="387" y="30" width="140" height="56" rx="9"/><text class="t" x="457" y="53" text-anchor="middle">TODO</text><text class="s" x="457" y="71" text-anchor="middle">TODO what it does</text></a>
+  </svg></div>
+  <figcaption>Select a component to jump to its section. TODO one sentence that walks the arrows.</figcaption></figure>
+
+  <h3>The life of one TODO</h3>
+  <ol class="life">
+    <li><b>Created</b><span>TODO what happens, to which record, in which state.</span></li>
+    <li><b>TODO</b><span>TODO each later stage, to its final state.</span></li>
+  </ol>
+
+  <h3>The TODO ideas that make it work</h3>
+  <div class="ideas">
+    <a href="#store" class="k-store"><strong>TODO idea</strong><span>TODO what it guarantees, in one line</span></a>
+    <a href="#todo" class="k-todo"><strong>TODO idea</strong><span>TODO what it guarantees, in one line</span></a>
+  </div>
+</section>
+
+<section id="api" class="k-api" data-toc="API service" data-num="1" data-group="Components" data-nodes="api"
+  data-more2="TODO what each call does for the caller"
+  data-more3="TODO an example request, how each call works in the store, validation and error codes">
+  <div class="sh"><h2><span class="num">1</span>API service</h2></div>
+  <p class="lede" data-req="FR1">TODO what clients do through it, and the one rule that makes its answers trustworthy.</p>
+  <div class="scroll"><table>
+    <tr><th>Endpoint</th><th>What it does</th></tr>
+    <tr><td><code>POST /v1/TODO</code></td><td>TODO</td></tr>
+  </table></div>
+  <div data-l="2">
+    <h3>What each call does</h3>
+    <ul>
+      <li><strong>Create</strong> TODO what the caller can rely on once it answers.</li>
+    </ul>
+  </div>
+  <div data-l="3">
+    <h3>Creating a TODO</h3>
+<pre data-lang="json"><code>POST /v1/TODO
+{
+  "field": "value"
+}
+
+201 Created
+{ "id": "t_7f3a" }</code></pre>
+    <p>TODO how each body field maps to a column, and which response fields are derived.</p>
+  </div>
+</section>
+
+<section id="store" class="k-store" data-toc="TODO store" data-num="2" data-nodes="store"
+  data-more2="TODO the records, the schema and the rules that keep it consistent"
+  data-more3="TODO example rows, the index list and the choice of database">
+  <div class="sh"><h2><span class="num">2</span>TODO store</h2></div>
+  <p class="lede" data-req="NFR1">TODO what it holds and the one property everything else relies on.</p>
+  <div data-l="2">
+    <h3>The schema</h3>
+    <figure><div class="schema">
+      <div><h4>todos <small>one row per TODO</small></h4><ul><li>todo_id <i class="pk">key</i></li><li>status <i>TODO the states</i></li><li>created_at</li><li>updated_at</li></ul></div>
+    </div>
+    <figcaption>TODO which table is hot, and what the less obvious columns are for.</figcaption></figure>
+  </div>
+  <div data-l="3">
+    <h3>Example rows</h3>
+    <div class="scroll"><table>
+      <tr><th>todo_id</th><th>status</th></tr>
+      <tr><td>t_7f3a</td><td>active</td></tr>
+    </table></div>
+    <p>TODO how to read these rows.</p>
+  </div>
+</section>
+
+<section id="todo" class="k-todo" data-toc="TODO component" data-num="3" data-nodes="todo"
+  data-more2="TODO why the obvious designs fail and how the mechanism works"
+  data-more3="TODO the exact writes, failover and tuning">
+  <div class="sh"><h2><span class="num">3</span>TODO component</h2></div>
+  <p class="lede">TODO what it does and the difficulty in one sentence.</p>
+  <p>TODO the idea that answers the difficulty, each term of art explained in the same sentence.</p>
+  <div data-l="2">
+    <h3>Why the obvious designs fail</h3>
+    <ul>
+      <li><strong>TODO the naive design.</strong> TODO how it breaks.</li>
+    </ul>
+    <div class="brief"><b>Brief: TODO term.</b> TODO two or three sentences a newcomer can follow.</div>
+    <p>TODO the mechanism, step by step.</p>
+  </div>
+  <div data-l="3">
+    <h3>TODO the guarded write</h3>
+<pre data-lang="sql"><code>UPDATE todos SET status = 'done', updated_at = now()
+WHERE todo_id = ? AND status = 'active';   -- the guard is in the write</code></pre>
+    <p>TODO what zero rows affected means and what the writer does next.</p>
+    <figure class="steps">
+      <div class="scroll"><svg viewBox="0 0 720 200" style="min-width:600px" role="img" aria-label="Timeline: TODO say in words what happens in order.">
+        <g class="k-todo"><rect class="box" x="20" y="10" width="120" height="34" rx="8"/><text class="t" x="80" y="27" text-anchor="middle" dominant-baseline="central">Actor A</text></g>
+        <g class="k-store"><rect class="box" x="300" y="10" width="120" height="34" rx="8"/><text class="t" x="360" y="27" text-anchor="middle" dominant-baseline="central">TODO row</text></g>
+        <path d="M80 44V190M360 44V190" stroke="var(--line)" stroke-width="1.2" stroke-dasharray="4 4"/>
+        <g data-s="1"><path class="wire" marker-end="url(#ah)" d="M80 84H358"/><text class="s" x="220" y="76" text-anchor="middle">TODO first step ✓</text></g>
+        <g data-s="2"><path marker-end="url(#ahb)" d="M80 150H358" stroke="var(--bad)" stroke-width="1.3" fill="none"/><text class="s" x="220" y="142" text-anchor="middle" style="fill:var(--bad)">TODO the write that is rejected</text></g>
+      </svg></div>
+      <figcaption>Read top to bottom as time passing, or press Play to step through it. TODO the one thing the diagram proves.</figcaption>
+      <ol class="stepnotes">
+        <li>TODO what happens in step 1 and why.</li>
+        <li>TODO what happens in step 2 and why.</li>
+      </ol>
+    </figure>
+  </div>
+</section>
+
+<section id="correctness" class="k-todo" data-toc="Correctness" data-group="Cross-cutting concerns" data-nodes="todo"
+  data-more2="TODO how repeats are made harmless and how failures are retried"
+  data-more3="TODO the edge cases">
+  <div class="sh"><h2>Correctness: TODO the guarantee in three words</h2></div>
+  <p class="lede">TODO the delivery guarantee the system makes, and what makes it safe.</p>
+  <div data-l="2">
+    <h3>TODO</h3>
+    <p>TODO one failure path traced to its end state: who notices, what state the item ends in, what is lost or repeated.</p>
+  </div>
+  <div data-l="3">
+    <h3>TODO</h3>
+    <p>TODO the rare paths.</p>
+  </div>
+</section>
+
+<section id="load" class="k-store" data-toc="Behaviour under load" data-nodes="store todo"
+  data-more2="TODO the policies that decide who waits, and what to measure"
+  data-more3="TODO a failure at the peak, walked through with numbers">
+  <div class="sh"><h2>Behaviour under load</h2></div>
+  <p class="lede">TODO where the peak comes from, with the number from the estimates.</p>
+  <p>TODO the rules that answer it, each named in plain words, so depth 1 gives the answer and not only the problem.</p>
+  <div data-l="2">
+    <h3>What to measure</h3>
+    <ul>
+      <li><strong>TODO the one health signal</strong> (TODO how it is computed from stored columns).</li>
+    </ul>
+  </div>
+  <div data-l="3">
+    <h3>TODO a failure at the peak</h3>
+    <p>TODO the walk-through, reusing the estimate’s numbers exactly.</p>
+  </div>
+</section>
+
+<section id="simple-design" class="k-store" data-toc="Design at lower scale" data-group="Wrap-up" data-nodes="store"
+  data-more2="TODO how the simple design works and what it costs">
+  <div class="sh"><h2>Design at lower scale: TODO the simplification</h2></div>
+  <p class="lede">Below about TODO, you can drop TODO. TODO what does the work instead.</p>
+  <div data-l="2">
+    <p>TODO the mechanism and the volume at which it stops being enough.</p>
+  </div>
+</section>
+
+<section id="reading" data-toc="References" data-nodes="" data-ref="1">
+  <div class="sh"><h2>References</h2></div>
+  <ul>
+    <li>TODO author, <a href="https://example.com/" target="_blank" rel="noopener">TODO title</a>: TODO what this guide takes from it.</li>
+  </ul>
+  <h3>How to cite this page</h3>
+  <p class="cite">“Building a TODO.” System design walkthrough, TODO Month Year. <span id="citeurl"><a href="https://dhorbach.github.io/system-design/TODO-slug.html" target="_blank" rel="noopener">https://dhorbach.github.io/system-design/TODO-slug.html</a></span></p>
+</section>
+
+<dl id="glossary" hidden>
+  <dt data-match="\bTODO pattern\b">TODO term</dt><dd>TODO one sentence, shown when the reader points at the term.</dd>
+</dl>
+
+<script>
+/* TODO only if the page has a demo of its own; otherwise delete this script */
+document.addEventListener('guide:ready',({detail:{$,$$,still}})=>{
+});
+</script>
+</body>
