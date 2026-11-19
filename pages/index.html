@@ -20,7 +20,7 @@ h1{font:600 clamp(2.8rem,7vw,4.8rem)/1.08 var(--head);letter-spacing:-.045em;mar
 .archive{border-top:1px solid var(--line)}
 .month{display:grid;grid-template-columns:170px minmax(0,1fr);gap:32px;padding:30px 0;border-bottom:1px solid var(--line)}
 .month h2{font:500 .9rem/1.6 var(--head);margin:4px 0;color:var(--muted)}
-.articles{list-style:none;margin:0;padding:0}
+.articles{list-style:none;margin:0;padding:0;display:grid;gap:20px}
 .article{display:block;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:26px 28px;text-decoration:none;transition:border-color .15s,transform .15s}
 .article:hover{border-color:var(--accent);transform:translateY(-2px)}
 .meta{display:flex;align-items:center;flex-wrap:wrap;gap:12px;color:var(--muted);font:400 .75rem/1.5 var(--mono)}
@@ -55,6 +55,17 @@ footer{max-width:1076px;margin:auto;padding:22px 20px calc(22px + env(safe-area-
     <section class="month" aria-labelledby="month-2026-11">
       <h2 id="month-2026-11">November 2026</h2>
       <ul class="articles">
+        <li>
+          <a class="article" href="distributed-matchmaker.html">
+            <div class="meta">
+              <time datetime="2026-11-19">Nov 19, 2026</time>
+              <span class="tag">Distributed systems</span>
+            </div>
+            <h3>Building a distributed matchmaker</h3>
+            <p>Put players into fair matches within seconds and never lose a ticket. Explore the ticket store, pool owners, pluggable rules and game server assignment, from the architecture to SQL, the rule contract in Go and measured numbers.</p>
+            <span class="read">Read the guide <span aria-hidden="true">↗</span></span>
+          </a>
+        </li>
         <li>
           <a class="article" href="distributed-job-scheduler.html">
             <div class="meta">

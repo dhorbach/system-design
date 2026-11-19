@@ -1,0 +1,1166 @@
+<head>
+<meta name="layout" content="guide">
+<title>Building a distributed matchmaker</title>
+<meta name="short-title" content="Distributed matchmaker">
+<meta name="description" content="Put players into fair matches within seconds and never lose a ticket: the ticket store, pool owners, pluggable rules and game server assignment.">
+<meta name="depth-3" content="SQL, example rows, the rule contract in Go, edge cases and tuning.">
+<style>
+/* component colours */
+:root{--api:var(--slate);--store:var(--indigo);--match:var(--teal);--assign:var(--amber)}
+.k-api{--k:var(--api)} .k-store{--k:var(--store)} .k-match{--k:var(--match)} .k-assign{--k:var(--assign)}
+
+/* the widening limit */
+.pool{position:relative;height:56px;margin:8px 10px 34px;border-bottom:1.5px solid var(--line)}
+.pool i{position:absolute;bottom:-7px;width:13px;height:13px;margin-left:-6.5px;border-radius:50%;background:var(--surface);border:1.5px solid var(--muted);transition:background .2s,border-color .2s}
+.pool i.in{background:color-mix(in srgb,var(--match) 45%,var(--surface));border-color:var(--match)}
+.pool i.an{background:var(--mark);border-color:var(--ink)}
+.pool .lim{position:absolute;bottom:13px;height:10px;min-width:2px;border:1.5px solid var(--match);border-bottom:0;border-radius:4px 4px 0 0;transition:left .2s,width .2s}
+.pool .ax{position:absolute;top:calc(100% + 11px);font-family:var(--head);font-size:.76rem;color:var(--muted)}
+.ctl output{font-variant-numeric:tabular-nums;min-width:2.6em;color:var(--ink);font-weight:600}
+</style>
+</head>
+<body>
+
+<template data-slot="map">
+  <svg class="minimap" viewBox="0 0 224 92" role="group" aria-label="System map. Select a component to jump to its part of the guide.">
+    <path class="wire" marker-end="url(#ah)" d="M102 17H121"/>
+    <path class="wire" marker-end="url(#ah)" d="M172 32V59"/>
+    <path class="wire" marker-end="url(#ah)" d="M126 32 104 59"/>
+    <g class="n k-api" data-node="api" data-go="api" tabindex="0" role="link" aria-label="API service"><rect x="2" y="2" width="100" height="30" rx="7"/><text x="52" y="17">API</text></g>
+    <g class="n k-store" data-node="store" data-go="ticket-store" tabindex="0" role="link" aria-label="Ticket store"><rect x="122" y="2" width="100" height="30" rx="7"/><text x="172" y="17">Ticket store</text></g>
+    <g class="n k-assign" data-node="assign" data-go="assigner" tabindex="0" role="link" aria-label="Assigner"><rect x="2" y="60" width="100" height="30" rx="7"/><text x="52" y="75">Assigner</text></g>
+    <g class="n k-match" data-node="match" data-go="matchmaker" tabindex="0" role="link" aria-label="Matchmaker"><rect x="122" y="60" width="100" height="30" rx="7"/><text x="172" y="75">Matchmaker</text></g>
+  </svg>
+</template>
+
+<section id="overview" data-toc="Problem" data-group="Framing" data-nodes="">
+  <div class="sh"><h2>Problem</h2></div>
+  <p class="lede">In an online game a player presses Play and expects to be in a match within seconds, with friends on the same side and against opponents of about the same strength (“two friends want a 15-a-side match”, “one player wants a 1 v 1 duel right now”). A matchmaker is the service that decides who plays with whom. The difficulty is that an even match needs enough similar players waiting at the same moment, and often they are not all there yet. The service then has to choose: start a less even match now, or keep people waiting until better-suited players arrive. It has to make that choice for a million players online at once, place every one of them in exactly one match even when machines fail, and let each game define for itself what an even match is.</p>
+</section>
+
+<section id="terms" data-toc="Terminology" data-nodes=""
+  data-more2="how the terms relate, with one match counted through, where each lives in the data model, and the supporting words"
+  data-more3="the neighbouring words and the one thing this guide uses each for">
+  <div class="sh"><h2>Terminology</h2></div>
+  <p>The requirements and guarantees below are stated per ticket, per pool and per match, and fairness is stated in rules, so each of these words has one meaning throughout the guide.</p>
+  <div class="scroll"><table>
+    <tr><th>Term</th><th>Meaning</th><th>Example</th></tr>
+    <tr id="term-mode"><td><strong>Mode</strong></td><td>A way to play that the game’s operators define: the team size, the largest party and the rules for a fair match. Every ticket names one mode.</td><td><code>siege</code>: two teams of 15</td></tr>
+    <tr id="term-ticket"><td><strong>Ticket</strong></td><td>What a client creates: a standing entry that asks to be placed in a match of one mode, for one player or for a party of friends who play together. It lists its players, each with the attributes that rules read. A ticket belongs to one region, keeps one id until its final state, and is in at most one match at a time. It is <strong>live</strong> while it waits for a match or is placed in one that has no game server yet.</td><td>Three friends asking for a <code>siege</code> match in Europe</td></tr>
+    <tr id="term-pool"><td><strong>Pool</strong></td><td>All waiting tickets that could be matched with each other: one mode in one region. The matchmaker works pool by pool.</td><td>Every waiting <code>siege</code> ticket in Europe</td></tr>
+    <tr id="term-match"><td><strong>Match</strong></td><td>What the system produces: tickets from one pool whose players exactly fill the mode’s two teams, and the team each ticket plays on. A match is created without a game server. It ends ready, with a game server reserved for it, or dropped, when none could be reserved.</td><td>30 players from 24 tickets, 15 a side</td></tr>
+    <tr id="term-rule"><td><strong>Rule</strong></td><td>One condition that every match of a mode must meet, with its settings. A rule judges a finished match; it does not build one.</td><td>“Combat ratings in the match span at most 2 levels”</td></tr>
+  </table></div>
+  <p>The examples use one imaginary game. It has three modes: <code>duel</code> (1 v 1), <code>skirmish</code> (5 v 5) and <code>siege</code> (15 v 15). Each player brings three attributes: a <strong>class</strong> (the role they chose to play, one of five), a <strong>combat rating</strong> (how strong the equipment they bring is, from 1 to 10) and a <strong>skill rating</strong> (how good the player is, from 0 to 3,000). The matchmaker itself knows none of the three; only the game’s rules do.</p>
+  <div data-l="2">
+    <h3>How they relate</h3>
+    <p>A mode has one pool in each region. A pool holds that mode’s waiting tickets in that region. A ticket has 1 to 5 players and is in at most one match at a time. A match has two teams and at most one game server. Counted through: a <code>siege</code> match is 30 players. If four of its tickets are parties (of 3, 3, 2 and 2 players) and the other 20 are single players, the match has 24 tickets.</p>
+    <p>In the data model a mode is one row of <code>modes</code> per version, a ticket is a row of <code>tickets</code> with its players in <code>ticket_players</code>, and a match is a row of <code>matches</code> with one row of <code>match_tickets</code> per ticket. A pool has no table of its own: it is the tickets that share a region and a mode and are in the state <code>waiting</code>. A rule is one entry in the list a mode keeps in its <code>rules</code> column.</p>
+    <h3>Supporting words</h3>
+    <ul>
+      <li><strong>Player</strong>: a person with an account. A player is on at most one live ticket at a time.</li>
+      <li><strong>Party</strong>: the players of one ticket when there is more than one. A party always plays on one team.</li>
+      <li><strong>Team</strong>: one side of a match.</li>
+      <li><strong>Attribute</strong>: a named fact about a player on a ticket that rules read: a number or a label. The matchmaker stores attributes and never interprets them.</li>
+      <li><strong>Rule set</strong>: the rules of one mode, as one list. It has a version, and a match records the version it was formed under.</li>
+      <li><strong>Penalty</strong>: the number a rule gives a match: 0 when the match meets the rule, larger the further it is off.</li>
+      <li><strong>Limit</strong>: a number in a rule’s settings, such as the 2 in “at most 2 levels”.</li>
+      <li><strong>Game server</strong>: the process a match is played on, supplied by the game server fleet.</li>
+      <li><strong>Matchmaker node</strong>: one process of the matchmaker. The node that holds a pool’s lease is that pool’s <strong>owner</strong>, and one pass of an owner over its pool, made once a second, is a <strong>round</strong>.</li>
+    </ul>
+  </div>
+  <div data-l="3">
+    <h3>Neighbouring words</h3>
+    <ul>
+      <li><strong>Queue</strong> is not used. The waiting tickets of a mode in a region are its pool, and <code>waiting</code> is the state.</li>
+      <li><strong>Request</strong> means one HTTP call. A request to join creates a ticket; it is not the ticket.</li>
+      <li><strong>Lobby, battle</strong> both mean match here, and only “match” is used. “Game” is kept for the product as a whole, as in “the game’s operators”. <strong>Session</strong> is kept for a player’s login session.</li>
+      <li><strong>Group, squad</strong> mean party.</li>
+      <li><strong>Constraint, filter, criterion</strong> mean rule. <strong>Score</strong> and <strong>cost</strong> mean penalty.</li>
+      <li><strong>Level</strong> is one step of combat rating: a rating of 7 is two levels above a rating of 5.</li>
+      <li><strong>Server</strong> on its own always means a game server. A process of the matchmaker is a matchmaker node, and a computer is a machine.</li>
+      <li><strong>Standby</strong> is a machine of the ticket store’s database. A matchmaker node that waits to take over a pool is a spare.</li>
+      <li><strong>Reserve</strong> is what the assigner does to a game server. Fleet products have their own word for it (Agones allocates a <code>GameServer</code>, Amazon GameLift places a game session); those words are used only for those products’ objects.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="requirements" data-toc="Requirements" data-nodes=""
+  data-more2="a one-line explanation of each requirement, and what is out of scope"
+  data-more3="the precise guarantee behind each requirement, with links to the section that delivers it">
+  <div class="sh"><h2>Requirements</h2></div>
+  <p>Each ID reappears as a tag wherever the design implements that requirement.</p>
+  <h3>Functional requirements</h3>
+  <ul data-reqs="FR">
+    <li><strong>Join alone or as a party.</strong><span data-l="2"> A player, or a party of up to 5, asks for a match in one mode and gets a ticket back.</span><span data-l="3"> The largest party is set per mode: 1 in <code>duel</code>, 5 in <code>skirmish</code> and <code>siege</code>. A ticket that could never be matched, because it breaks a rule of its mode all by itself, is refused at once and told which rule (<a href="#api">API service</a>).</span></li>
+    <li><strong>Leave while waiting.</strong><span data-l="2"> A ticket can be cancelled until it is placed in a match.</span><span data-l="3"> A cancel that arrives after the ticket was placed is refused and answered with the match. It is not forgotten: if that match gets no game server, the ticket is cancelled and does not go back to waiting (<a href="#correctness">correctness</a>).</span></li>
+    <li><strong>Every player is told the outcome: where to play, or that no match was found.</strong><span data-l="2"> Each player of a matched ticket receives the game server’s address within 2 s of the server being reserved.</span><span data-l="3"> Any player of a ticket can also ask for its state at any time, including after a reconnect, and gets the same answer (<a href="#api">API service</a>).</span></li>
+    <li><strong>Rules per mode, changed without a release.</strong><span data-l="2"> A mode’s fairness is a rule set that operators change while the system runs.</span><span data-l="3"> Operators change a rule’s settings, add or remove a rule, or add a mode. Matches formed afterwards follow the new rule set and record its version. A kind of rule the matchmaker does not know yet is added without changing how tickets are stored, matched or assigned (<a href="#rules">rules</a>).</span></li>
+    <li><strong>Parties stay together.</strong><span data-l="2"> All players of one ticket play in the same match, on the same team.</span><span data-l="3"> No rule and no failure splits a party (<a href="#forming-a-match">forming a match</a>).</span></li>
+    <li><strong>A match comes with a game server.</strong><span data-l="2"> Players are sent to a match only once a game server is reserved for it, in the pool’s region.</span><span data-l="3"> Until then a status read may show <code>matched</code> with no address. If no server can be reserved within about 10 s, the tickets go back to waiting and keep their waiting time (<a href="#assigner">assigner</a>).</span></li>
+  </ul>
+  <h3>Non-functional requirements</h3>
+  <ul data-reqs="NFR">
+    <li><strong>One match at a time.</strong><span data-l="2"> No player is ever on two live tickets and no ticket is ever in two matches at once: 0 double placements, whatever crashes.</span><span data-l="3"> At most one of a ticket’s matches ever gets a game server. A join that is sent again returns the ticket the first one created, whatever state that ticket has reached (<a href="#ticket-store">ticket store</a>, <a href="#correctness">correctness</a>).</span></li>
+    <li><strong>Fair matches.</strong><span data-l="2"> Every match meets every rule of its mode’s rule set. In the example game: combat ratings within 2 levels, class counts within 1 between the teams, skill ratings within 100 to 400 points.</span><span data-l="3"> The rule set is the version in force when the match was formed. The example game’s has five rules: combat ratings in the match span at most 2 levels; for each class the two teams’ counts differ by at most 1; skill ratings span at most a limit that starts at 100 points and grows by 10 points for each second the longest-waiting ticket has waited, up to 400, where a party counts once with its highest rating; the teams’ average skill ratings differ by at most 50 points; and their average combat ratings by at most 0.5 level (<a href="#rules">rules</a>).</span></li>
+    <li><strong>Short waits, and always an answer.</strong><span data-l="2"> At the evening peak half of all tickets have a game server within 10 s of joining and 95% within 60 s. At any hour a ticket gets an answer within 300 s, or up to 12 s later when it was placed in a match shortly before then.</span><span data-l="3"> The answer is a game server’s address or the state <code>expired</code>. A ticket still waiting at 300 s expires. A ticket placed in a match just before then gets that match’s game server within about 10 s, or the match is dropped and the ticket expires in the next round: either way it has its answer within 12 s of the 300 s (<a href="#matchmaker">matchmaker</a>, <a href="#assigner">assigner</a>, <a href="#load">behaviour under load</a>).</span></li>
+    <li><strong>Accepted means kept.</strong><span data-l="2"> Once a join is accepted, losing any one machine loses no ticket and no waiting time, and matching resumes within 10 s. One exception: losing the main machine of a region’s ticket store pauses joins and matching in that region for up to 60 s.</span><span data-l="3"> Nothing that was accepted is lost in either case (<a href="#ticket-store">ticket store</a>).</span></li>
+    <li><strong>Survive an event start.</strong><span data-l="2"> 8,000 joins per second for 10 s are accepted, with 99% answered within 200 ms.</span><span data-l="3"> Waits are back inside the evening-peak targets within 60 s of the burst ending (<a href="#load">behaviour under load</a>).</span></li>
+  </ul>
+  <div data-l="2">
+    <h3>Out of scope</h3>
+    <ul>
+      <li><strong>Working out skill ratings.</strong> The design reads a rating that another service computes from past results, and never changes it.</li>
+      <li><strong>Forming a party.</strong> Invitations, friends lists and chat happen before a ticket exists; the ticket arrives with its players already listed.</li>
+      <li><strong>The match itself.</strong> What happens on the game server, and its networking, starts where this design ends.</li>
+      <li><strong>The game server fleet’s internals.</strong> Starting, scaling and health-checking game servers belongs to the fleet. The design uses a small interface to it.</li>
+      <li><strong>Filling empty seats</strong> in a match that is already running.</li>
+      <li><strong>Tournaments, private matches and custom rules per match.</strong></li>
+      <li><strong>More than two teams, or teams of unequal size.</strong></li>
+      <li><strong>A confirmation step.</strong> A formed match goes straight to a game server; players are not asked to accept it first.</li>
+      <li><strong>Choosing the map</strong>, and tickets that name several modes at once.</li>
+      <li><strong>Smaller matches when a pool is thin.</strong> A match always fills the mode’s team size; a ticket that cannot be matched expires.</li>
+      <li><strong>Rules that fix the shape of a match before it is filled</strong> (for example “3 players at the top level, 5 in the middle, 7 at the bottom”). A rule can state such a shape; the search described here is not built to find it.</li>
+      <li><strong>Matching across regions.</strong> A ticket waits in one region’s pool. Each player’s session belongs to one region, and a party forms inside one region.</li>
+      <li><strong>Cheat detection</strong> and players who hide their real skill.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="estimates" data-toc="Capacity estimates" data-nodes=""
+  data-more2="the assumptions, the measured inputs, the working behind each number and what the numbers mean for the design"
+  data-more3="the load on one region’s store, what the store and one owner can carry, and storage">
+  <div class="sh"><h2>Back-of-the-envelope estimates</h2></div>
+  <p class="lede">Before choosing components, size the system: how many tickets arrive, how many wait at once, and how fast players arrive in the emptiest corner of the game. The number that drives the design is in that corner. In the smallest region at the quietest hour, among players whose combat ratings are close enough to share a match, the 30 players of one <code>siege</code> match take a full minute just to arrive.</p>
+  <p>The table shows the results for a game with 1 million players online at its evening peak, in 5 regions.<span data-l="2"> Its third column says where each result comes from, and the assumptions and the working follow it step by step.</span></p>
+  <div class="scroll"><table>
+    <tr><th>Estimate</th><th>Result</th><th data-l="2">Where it comes from</th></tr>
+    <tr><td>Tickets created</td><td>About 1,333 per second at the evening peak</td><td data-l="2">1 million players, each joining once every 10 minutes, is about 1,667 players per second. A ticket holds 1.25 players on average.</td></tr>
+    <tr><td>An event start</td><td>8,000 tickets per second for 10 s, 6 times the evening peak</td><td data-l="2">A tenth of the players online, 100,000, join within 10 s: 10,000 players per second.</td></tr>
+    <tr><td>Tickets waiting at once</td><td>About 20,000, holding 25,000 players</td><td data-l="2">1,333 tickets arrive each second and wait 15 s on average.</td></tr>
+    <tr><td>Busiest pool</td><td>240 tickets per second and 3,600 waiting; an event start adds 14,400 in 10 s</td><td data-l="2">The busiest region has 30% of the players and <code>siege</code> takes 60% of the joins, so this pool gets 18% of all tickets. After an event start: 18% of 8,000 for 10 s.</td></tr>
+    <tr><td>Matches formed</td><td>About 167 per second, each needing a game server</td><td data-l="2">Per second, 1,000 players join <code>siege</code> (30 to a match), 500 <code>skirmish</code> (10) and 167 <code>duel</code> (2): about 33, 50 and 83 matches.</td></tr>
+    <tr><td>Smallest region, quietest hour, one span of combat ratings</td><td>60 s before the 30 players of one <code>siege</code> match have arrived</td><td data-l="2">A tenth of the peak, 5% of the players in this region, 60% of them in <code>siege</code>, 10% of those in this span: 0.5 players per second.</td></tr>
+  </table></div>
+  <p>Two things follow. Even the busiest pool, with 3,600 tickets waiting and at worst 18,000 after an event start, is small enough for one process to read and work through every second, so no pool has to be split across machines. And in the emptiest corner players are the scarce resource, not computing power: anything that divides the waiting players further makes that minute longer.</p>
+  <div data-l="2">
+    <h3>Assumptions</h3>
+    <p>Every number above is worked out from these inputs. Change one and the results change with it.</p>
+    <div class="scroll"><table>
+      <tr><th>Assumption</th><th>Value</th></tr>
+      <tr><td>Players online at the evening peak</td><td>1,000,000</td></tr>
+      <tr><td>Regions; share of players in the busiest; in the smallest</td><td>5; 30%; 5%</td></tr>
+      <tr><td>Share of joins by mode: <code>siege</code>, <code>skirmish</code>, <code>duel</code></td><td>60%, 30%, 10%</td></tr>
+      <tr><td>Players in a match: <code>siege</code>, <code>skirmish</code>, <code>duel</code></td><td>30, 10, 2</td></tr>
+      <tr><td>A player joins once every (about 7 minutes in a match, 3 between)</td><td>600 s</td></tr>
+      <tr><td>Average match length</td><td>420 s</td></tr>
+      <tr><td>Players per ticket, on average (taken as the same in every mode, for simplicity; a <code>duel</code> ticket in fact always has one)</td><td>1.25</td></tr>
+      <tr><td>Average wait at the evening peak (a cautious input for sizing: the waits measured on the prototype were much shorter)</td><td>15 s</td></tr>
+      <tr><td>Event start: share of online players who join within 10 s</td><td>10%</td></tr>
+      <tr><td>An event start has the same mix of regions and modes as the evening peak</td><td>assumed</td></tr>
+      <tr><td>Players online at the quietest hour, as a share of the peak</td><td>10%</td></tr>
+      <tr><td>Share of a mode’s players inside its least populated span of 3 combat rating levels</td><td>10%</td></tr>
+      <tr><td>Average players online over a day, as a share of the peak</td><td>50%</td></tr>
+      <tr><td>History kept</td><td>7 days</td></tr>
+      <tr><td>A player’s session belongs to one region, and a party forms inside one region</td><td>always</td></tr>
+      <tr><td>The profile service, outside the system: lookups it answers, and how fast</td><td>10,000 per second, 99% within 50 ms</td></tr>
+      <tr><td>The game server fleet, outside the system: reservations it makes in a region, and how fast it answers</td><td>1,000 per second, 99% within 500 ms</td></tr>
+    </table></div>
+    <h3>Measured inputs</h3>
+    <p>Four more inputs are not assumed but measured, on a prototype of this design, and rounded up. The setup: PostgreSQL 17 with a synchronous standby, both in containers on one 32-core workstation with one NVMe disk; the forming engine in Go on one core of the same machine. They are not production figures: a production disk writes faster, and a standby in another zone adds its network round trip to every commit.</p>
+    <div class="scroll"><table>
+      <tr><th>Input</th><th>Value used</th><th>Measured</th></tr>
+      <tr><td>One commit, acknowledged once both machines have it on disk</td><td>10 ms</td><td>9 to 10 ms</td></tr>
+      <tr><td>Reading the 14,400 waiting tickets of one pool</td><td>45 ms</td><td>15 ms typical, 39 ms for the slowest 1%</td></tr>
+      <tr><td>Decoding their 14,400 summaries</td><td>40 ms</td><td>35 ms</td></tr>
+      <tr><td>Forming matches from them, example rule set</td><td>50 ms</td><td>48 ms</td></tr>
+    </table></div>
+    <h3>Tickets arriving</h3>
+    <div class="formula">players joining: 1,000,000 ÷ 600 s ≈ 1,667 players/s<br>tickets created: 1,667 ÷ 1.25 ≈ 1,333 tickets/s</div>
+    <h3>An event start</h3>
+    <div class="formula">players in the burst: 1,000,000 × 10% = 100,000 players<br>rate: 100,000 ÷ 10 s = 10,000 players/s<br>tickets: 10,000 ÷ 1.25 = 8,000 tickets/s<br>against the peak: 8,000 ÷ 1,333 ≈ 6 times</div>
+    <p>An event start is a moment the game itself creates: a tournament opens, a season begins, the game comes back after maintenance. It lasts seconds, and it is what the system is sized for.</p>
+    <h3>Tickets waiting</h3>
+    <div class="formula">tickets waiting: 1,333 × 15 s ≈ 20,000 tickets<br>players waiting: 1,667 × 15 s ≈ 25,000 players</div>
+    <h3>The busiest pool</h3>
+    <div class="formula">share of all tickets: 30% × 60% = 18%<br>arriving: 1,333 × 18% ≈ 240 tickets/s<br>waiting: 240 × 15 s = 3,600 tickets<br>at an event start: 8,000 × 18% = 1,440 tickets/s<br>arrived after 10 s: 1,440 × 10 s = 14,400 tickets</div>
+    <p>The 14,400 are the tickets of the burst alone. If nothing at all were matched during those 10 s, the pool would hold them on top of the 3,600 already waiting:</p>
+    <div class="formula">the worst pool: 3,600 + 14,400 = 18,000 tickets</div>
+    <h3>Matches formed</h3>
+    <div class="formula">siege: 1,667 × 60% ÷ 30 ≈ 33.3 matches/s<br>skirmish: 1,667 × 30% ÷ 10 ≈ 50 matches/s<br>duel: 1,667 × 10% ÷ 2 ≈ 83.3 matches/s<br>total: 33.3 + 50 + 83.3 ≈ 167 matches/s<br>tickets per match: 1,333 ÷ 167 ≈ 8 tickets</div>
+    <p>The smallest mode forms the most matches. Every match needs a game server, so the fleet is asked for about 167 a second, and 6 times that at an event start.</p>
+    <h3>The emptiest corner</h3>
+    <div class="formula">players arriving in the slice: 1,667 × 10% × 60% × 5% × 10% ≈ 0.5 players/s<br>one siege match: 30 ÷ 0.5 = 60 s<br>the same slice at the evening peak: 30 ÷ 5 = 6 s</div>
+    <p>The four percentages are the quietest hour, the share of <code>siege</code>, the smallest region and the least populated span of combat ratings. The 60 s is not a wait caused by the system; it is how long the players take to exist.</p>
+    <h3>What the numbers say</h3>
+    <ul>
+      <li><strong>One owner per pool is enough.</strong> The busiest pool has 3,600 tickets waiting and at worst 18,000, which one process reads and works through in a fraction of a second.</li>
+      <li><strong>Never divide the waiting players.</strong> With 60 s just to gather 30 players in the emptiest corner, any further split (by node, by skill band, by class) makes waits longer. Every rule is checked inside one pool.</li>
+      <li><strong>Limits must loosen, and waiting must end.</strong> When the right players are not there, a limit that widens with waiting finds a looser match, and a ticket that still cannot be matched gets a definite answer.</li>
+      <li><strong>Size for the event start.</strong> 8,000 tickets per second is 6 times the evening peak. The components that take joins are sized for it, not for the average.</li>
+      <li><strong>Reserving game servers is a job of its own.</strong> About 167 matches a second each need one, from a fleet that can be slow or empty.</li>
+    </ul>
+  </div>
+  <div data-l="3">
+    <h3>The load on one region’s store</h3>
+    <p>Each region has its own ticket store, so the store is sized for the busiest region.</p>
+    <div class="formula">busiest region: 1,333 × 30% ≈ 400 tickets/s<br>waiting there: 20,000 × 30% = 6,000 tickets<br>at an event start: 8,000 × 30% = 2,400 tickets/s<br>commits per ticket: 1 + 3 ÷ 8 = 1.375 commits<br>commits at an event start: 2,400 × 1.375 = 3,300 commits/s<br>row writes per ticket: 1 + 1.25 + 1 + 1 + 1 + 1.25 + 3 ÷ 8 = 6.875 rows<br>row writes at an event start: 2,400 × 6.875 = 16,500 rows/s</div>
+    <p>A ticket costs one commit for its join, plus its share of the three commits a match needs (the match itself, the assigner’s claim, and the result), spread over the match’s 8 tickets. A reservation that has to be retried costs one more commit for each retry, which this estimate leaves out. The row writes are the ticket, its 1.25 players, the move to <code>matched</code>, the placement, the move to <code>assigned</code>, the 1.25 players released, and a share of the three writes to the match.</p>
+    <h3>What the store and one owner can carry</h3>
+    <p>Is one store per region enough, and one owner per pool? Three choices made later in the design are inputs here: the API nodes of a region share 128 connections to the store for writes, an owner commits on 16, and an owner allows itself 500 ms of each round for forming.</p>
+    <div class="formula">connections busy at an event start: 3,300 × 0.010 s = 33 connections<br>joins on 128 connections: 128 ÷ 0.010 s = 12,800 joins/s<br>room over the event start: 12,800 ÷ 2,400 ≈ 5.3 times<br>one owner on 16 connections: 16 ÷ 0.010 s = 1,600 matches/s<br>one owner on one connection: 1 ÷ 0.010 s = 100 matches/s<br>the worst pool in matches: 18,000 ÷ 24 = 750 matches<br>committing them: 750 ÷ 1,600 ≈ 0.469 s<br>read, decode and form for 14,400: 45 ms + 40 ms + 50 ms = 135 ms<br>the same for 18,000: 135 ms × 18,000 ÷ 14,400 ≈ 169 ms<br>the worst round: 169 ms + 469 ms = 638 ms<br>forming alone for 18,000: 50 ms × 18,000 ÷ 14,400 ≈ 63 ms<br>room for costlier rules: 500 ms ÷ 63 ms ≈ 8 times<br>an event in one mode only: 3,600 + 24,000 = 27,600 tickets<br>its matches: 27,600 ÷ 24 = 1,150 matches<br>its round: 135 ms × 27,600 ÷ 14,400 + 1,150 ÷ 1,600 × 1,000 ms ≈ 978 ms</div>
+    <p>Commits that wait at the same moment are written to disk together, so the store’s throughput is the number of connections divided by the time of one commit. The measurement agrees: 128 connections carried 12,333 joins per second. A <code>siege</code> match has 30 ÷ 1.25 = 24 tickets. The times for reading, decoding and forming were measured for 14,400 tickets and grow in step with the number of tickets, so they are scaled to the worst pool of 18,000. The last three lines are the case the assumptions leave out: a whole event lands on one mode, and the busiest region’s 2,400 tickets a second all enter one pool for 10 s. That round takes just under its second.</p>
+    <h3>Storage</h3>
+    <p>How much does a region keep? Rows stay for 7 days. Their sizes were measured with their indexes and with superseded row versions not yet cleaned up: 650 B for a ticket, 280 B for a player on it, 470 B for a match and 150 B for a placement.</p>
+    <div class="formula">tickets per day: 1,333 × 50% × 86,400 s ≈ 57,600,000 tickets<br>players on them: 1,667 × 50% × 86,400 s ≈ 72,000,000 rows<br>matches per day: 167 × 50% × 86,400 s ≈ 7,200,000 matches<br>per day: 57,600,000 × 650 B + 72,000,000 × 280 B + 7,200,000 × 470 B + 57,600,000 × 150 B ≈ 69.6 GB<br>kept for 7 days: 69.6 GB × 7 ≈ 487 GB<br>in the busiest region: 487 GB × 30% ≈ 146 GB<br>matches running at once: 167 × 420 s ≈ 70,000 matches</div>
+    <p>146 GB fits one database with room to spare; the region’s three machines each hold it. The 70,000 running matches are the fleet’s size, given for context.</p>
+  </div>
+</section>
+
+<section id="system" data-toc="High-level design" data-nodes="api store match assign"
+  data-more2="the outside services, and where leases live">
+  <div class="sh"><h2>High-level design</h2></div>
+  <p class="lede">The design separates four jobs: accepting tickets, keeping them, forming matches and getting each match a game server. Only the ticket store holds state, so every other part can crash and restart without losing a ticket.</p>
+  <figure><div class="scroll"><svg viewBox="-2 0 532 250" style="min-width:460px;max-width:620px;margin:0 auto" role="img" aria-label="Architecture: the API service reads players’ attributes from the profile service and writes tickets to the ticket store; the matchmaker reads waiting tickets from the store and writes matches back; the assigner takes matches from the store, reserves game servers from the fleet and writes the result back to the store.">
+    <path class="wire" marker-end="url(#ah)" d="M140 58H192"/><text class="s" x="166" y="50" text-anchor="middle">tickets</text>
+    <path class="wire" marker-end="url(#ah)" d="M333 48H386"/><text class="s" x="360" y="40" text-anchor="middle">waiting</text>
+    <path class="wire" marker-end="url(#ah)" d="M387 68H334"/><text class="s" x="360" y="84" text-anchor="middle">matches</text>
+    <path class="wire" marker-end="url(#ah)" d="M253 86V169"/><text class="s" x="245" y="132" text-anchor="end">matches to reserve</text>
+    <path class="wire" marker-end="url(#ah)" d="M273 170V87"/><text class="s" x="281" y="132">ready</text>
+    <path class="wire" marker-end="url(#ah)" d="M333 198H386"/><text class="s" x="360" y="190" text-anchor="middle">reserve</text>
+    <path class="wire" marker-end="url(#ah)" d="M70 86V169"/><text class="s" x="78" y="132">attributes</text>
+    <a href="#api" class="k-api"><rect class="box" x="0" y="30" width="140" height="56" rx="9"/><text class="t" x="70" y="53" text-anchor="middle">API service</text><text class="s" x="70" y="71" text-anchor="middle">join, leave, outcome</text></a>
+    <a href="#ticket-store" class="k-store"><rect class="box" x="193" y="30" width="140" height="56" rx="9"/><text class="t" x="263" y="53" text-anchor="middle">Ticket store</text><text class="s" x="263" y="71" text-anchor="middle">tickets, matches, leases</text></a>
+    <a href="#matchmaker" class="k-match"><rect class="box" x="387" y="30" width="140" height="56" rx="9"/><text class="t" x="457" y="53" text-anchor="middle">Matchmaker</text><text class="s" x="457" y="71" text-anchor="middle">one owner per pool</text></a>
+    <a href="#assigner" class="k-assign"><rect class="box" x="193" y="170" width="140" height="56" rx="9"/><text class="t" x="263" y="193" text-anchor="middle">Assigner</text><text class="s" x="263" y="211" text-anchor="middle">a server per match</text></a>
+    <g style="--k:var(--muted)"><rect class="box" x="0" y="170" width="140" height="56" rx="9"/><text class="t" x="70" y="193" text-anchor="middle">Profile service</text><text class="s" x="70" y="211" text-anchor="middle">outside the system</text></g>
+    <g style="--k:var(--muted)"><rect class="box" x="387" y="170" width="140" height="56" rx="9"/><text class="t" x="457" y="193" text-anchor="middle">Game server fleet</text><text class="s" x="457" y="211" text-anchor="middle">outside the system</text></g>
+  </svg></div>
+  <figcaption>Select a component to jump to its section. The API writes tickets into the ticket store; the matchmaker reads each pool’s waiting tickets and writes matches back; the assigner takes each new match, reserves a game server from the fleet and records its address, which the API passes on to the players.<span data-l="2"> The profile service supplies each player’s attributes at the join, and the fleet supplies game servers; both are outside the system and reached through small interfaces. A third outside service, the login service, is not drawn: it tells the API who is calling and which region their session belongs to. Leases are rows in the ticket store, not a component of their own.</span></figcaption></figure>
+
+  <h3>The life of one ticket</h3>
+  <ol class="life">
+    <li><b>Joined</b><span>Three friends press Play for a <code>siege</code> match in Europe. The API reads their attributes from the profile service and stores one ticket, <code>waiting</code>.</span></li>
+    <li><b>Read</b><span>Within a second, the matchmaker node that owns the pool (Europe, <code>siege</code>) reads all of its waiting tickets afresh.</span></li>
+    <li><b>Formed</b><span>Starting from the ticket that has waited longest, it gathers the nearest tickets that every rule allows, 30 players in all, and splits them into two teams.</span></li>
+    <li><b>Committed</b><span>One write stores the match and moves its 24 tickets to <code>matched</code>, but only if every one of them is still <code>waiting</code>.</span></li>
+    <li><b>Reserved</b><span>An assigner asks the fleet for a game server, then marks the match <code>ready</code> and its tickets <code>assigned</code>. If no server comes within 10 s, the tickets go back to <code>waiting</code> and keep their waiting time.</span></li>
+    <li><b>Told</b><span>The API holds an open connection to each waiting player. It sees the change within half a second and sends the three friends the server’s address.</span></li>
+  </ol>
+
+  <h3>The six ideas that make it work</h3>
+  <div class="ideas">
+    <a href="#ticket-store" class="k-store"><strong>Durable before accepted</strong><span>A join is answered only once the ticket is on two machines</span></a>
+    <a href="#one-live-ticket" class="k-store"><strong>One live ticket per player</strong><span>The store itself refuses a second one, whatever the API remembers</span></a>
+    <a href="#matchmaker" class="k-match"><strong>One owner per pool</strong><span>For speed, not for safety: nobody else works on the same tickets</span></a>
+    <a href="#correctness" class="k-store"><strong>A match is one guarded write</strong><span>It takes all of its tickets or none, so no ticket lands in two matches</span></a>
+    <a href="#rules" class="k-match"><strong>Rules judge, the engine builds</strong><span>A new rule is one more answer to “is this match acceptable?”</span></a>
+    <a href="#assigner" class="k-assign"><strong>Reserve after commit</strong><span>With a deadline and a way back, so no match waits for ever</span></a>
+  </div>
+</section>
+
+<section id="api" class="k-api" data-toc="API service" data-num="1" data-group="Components" data-nodes="api"
+  data-more2="what each call guarantees, the operators’ calls, how a player is told the outcome, and what happens when a player disappears"
+  data-more3="an example join, the join transaction, the stream check, the answers to each call, and limits on the caller">
+  <div class="sh"><h2><span class="num">1</span>API service</h2></div>
+  <p class="lede" data-req="FR1 FR2">Clients use one small REST API to join, to leave and to be told the outcome. A join is answered only once the ticket is committed to the ticket store, and it is the store, not the API’s memory, that refuses a second live ticket for the same player.</p>
+  <div class="scroll"><table>
+    <tr><th>Endpoint</th><th>What it does</th></tr>
+    <tr><td><code>POST /v1/tickets</code></td><td>Join: create a ticket for one player or a party</td></tr>
+    <tr><td><code>GET /v1/tickets/{ticket_id}</code></td><td>Read a ticket’s state, with its match and server address once it has them</td></tr>
+    <tr><td><code>GET /v1/tickets/{ticket_id}/events</code></td><td>A stream that sends each change of state until the ticket’s final state</td></tr>
+    <tr><td><code>GET /v1/players/me/ticket</code></td><td>Find the caller’s most recent ticket, for a client that lost its ticket id</td></tr>
+    <tr><td><code>DELETE /v1/tickets/{ticket_id}</code></td><td>Leave: cancel a ticket that is still waiting</td></tr>
+    <tr data-l="2"><td><code>GET /v1/matches/{match_id}</code></td><td>Read a match with its tickets and teams</td></tr>
+    <tr data-l="2"><td><code>GET /v1/modes</code>, <code>PUT /v1/modes/{mode}</code></td><td>Operators read the modes, or write a new version of one</td></tr>
+    <tr data-l="2"><td><code>GET /v1/rule-kinds</code></td><td>List the kinds of rule in the rule library of the API node that answers</td></tr>
+  </table></div>
+  <p data-req="FR3">Every player of a ticket is told the outcome through the stream: the game server’s address, or that the ticket was cancelled or expired. The API node that holds a stream does not wait to be told: twice a second it asks the store about all the tickets it is watching, so no outcome can be lost with a message.</p>
+  <div data-l="2">
+    <h3>What each call guarantees</h3>
+    <ul>
+      <li data-req="NFR4"><strong>Join</strong> answers only after the ticket and its players are committed together, so an accepted ticket is durable. The API first reads each player’s attributes from the profile service and checks that the ticket could ever be matched: the party is within the mode’s limit, every attribute the rules read is present, and the ticket breaks no rule by itself.</li>
+      <li data-req="NFR1"><strong>Join again</strong> is safe. The client makes up a join key and sends it with the join. A join that arrives again with the same key, because the first answer was lost, is answered with the ticket the first one created, in whatever state that ticket is by now, also when it already has a game server. A join with a new key from a player who is live on another ticket is refused.</li>
+      <li><strong>Leave</strong> cancels the ticket if it is still <code>waiting</code>. If a match took it first, the cancel is refused and answered with that match, and the request is kept on the ticket: should that match be dropped for want of a game server, the ticket is cancelled and does not go back into the pool.</li>
+      <li><strong>Read</strong> and the <strong>stream</strong> give the same facts: the state, and once the ticket is <code>assigned</code>, the match, the team and the game server’s address. Only a player on the ticket may ask.</li>
+      <li><strong>Write a mode</strong> stores a new version of its rule set after checking it against the rule library. Matches formed from the next round on follow it.</li>
+      <li><strong>Read a match</strong> returns its state, its two teams and, once it has one, its game server. A player may read the match their own ticket is in; the game server and support tools read any match with credentials of their own.</li>
+      <li><strong>Read the modes</strong> and <strong>list the rule kinds</strong> are for operators: the current version of every mode with its rule set, and the kinds and settings a rule set may use.</li>
+    </ul>
+    <h3>How a player is told</h3>
+    <p>The client opens the stream right after joining and keeps it open: a long-lived HTTP response (server-sent events) or a WebSocket, whichever the game already uses. One API node may hold tens of thousands of streams. Every 500 ms it reads the state of all the tickets it is watching in one query and sends each stream what changed. A player therefore has the server’s address at most about 0.5 s after it is stored, inside the 2 s of FR3, and the store is asked about 2 times a second per API node, not once per player.</p>
+    <p>Nothing depends on the stream. A client that lost it asks for its ticket by id, or without the id through <code>GET /v1/players/me/ticket</code>, and opens a new one.</p>
+    <h3>When a player disappears</h3>
+    <p>A client that quits cleanly leaves through the API. A client that crashes or loses its connection leaves nothing behind but a closed stream, and a closed stream proves little: the players of a party can hold streams on different API nodes, and a player who reconnects usually lands on another node. No API node can tell from its own streams that nobody is listening any more, so none of them cancels a ticket on that evidence. The ticket stays in its pool until it is matched or expires, and what a match does with a player who is not there is the game’s business.</p>
+    <p>A matchmaker that needs such tickets gone sooner has to put the fact “someone is still listening” into the store, for example as a last-seen time per ticket that the stream checks refresh, and pay for one more write per waiting ticket every few seconds. This design does not.</p>
+  </div>
+  <div data-l="3">
+    <h3>Joining</h3>
+<pre data-lang="json"><code>POST /v1/tickets
+{
+  "join_key": "k_5f0c7a1e",
+  "mode": "siege",
+  "players": [
+    { "player_id": "p_1041", "params": { "equipment_id": "e_77" } },
+    { "player_id": "p_2203", "params": { "equipment_id": "e_12" } },
+    { "player_id": "p_3310", "params": { "equipment_id": "e_45" } }
+  ]
+}
+
+201 Created
+{ "ticket_id": "t_41", "state": "waiting", "created_at": "2026-11-19T20:15:03Z" }</code></pre>
+    <p><code>join_key</code> and <code>mode</code> become the columns of the same names in <code>tickets</code>; the key is any string the client makes up for this one join. Each entry of <code>players</code> becomes a row of <code>ticket_players</code>: <code>player_id</code>, and <code>params</code>, a document the API does not read. It passes <code>params</code> to the profile service, which answers with that player’s attributes for the mode; they are stored as <code>attrs</code>. The region and <code>created_by</code> come from the caller’s session, never from the body. The rule library computes <code>size</code>, <code>sort_key</code> and <code>summary</code> from the attributes, and <code>mode_version</code> records which version of the rule set it used. The <code>ticket_id</code> is generated by the API.</p>
+<pre data-lang="sql"><code>BEGIN;                                                        -- join
+INSERT INTO tickets (id, join_key, region, mode, mode_version, state, size, sort_key, summary, created_by, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, now(), now());
+INSERT INTO ticket_players (ticket_id, player_id, params, attrs, live)
+VALUES (?, ?, ?, ?, true), (?, ?, ?, ?, true), (?, ?, ?, ?, true);
+COMMIT;</code></pre>
+    <p>Two unique indexes can refuse this transaction (<a href="#ticket-store">ticket store</a>). If a ticket with this creator and this <code>join_key</code> exists, the join is a repeat: the API rolls back, reads that ticket and answers <code>200</code> with it, whatever its state. If a listed player is already live on another ticket, the second insert is refused by the index that covers <code>player_id</code> for live rows only: the API rolls back and answers <code>409</code> with the id of that ticket.</p>
+    <h3>The stream check</h3>
+<pre data-lang="sql"><code>SELECT t.id, t.state, t.match_id, t.team, t.end_reason, m.server_address   -- every 500 ms, per API node
+FROM tickets t LEFT JOIN matches m ON m.id = t.match_id
+WHERE t.id IN (?, ?, ?);</code></pre>
+    <p>The list holds every ticket the node has a stream for. A stream ends when its ticket reaches <code>assigned</code>, <code>cancelled</code> or <code>expired</code>.</p>
+    <h3>Answers</h3>
+    <ul>
+      <li><strong>Join.</strong> <code>201</code> for a new ticket. <code>200</code> for the same join key again. <code>409 already_live</code> when a listed player is live on another ticket (waiting, or matched and not yet assigned), with that ticket’s id. <code>422</code> for a party over the mode’s limit, an unknown or disabled mode, a player without an attribute the rule set reads (<code>missing_attribute</code>), or a ticket that breaks a rule by itself (<code>rule_refused</code>, with the rule). <code>503</code> with <code>Retry-After</code> when the profile service does not answer within 100 ms or the store cannot be reached; no ticket was created.</li>
+      <li><strong>Leave.</strong> <code>200</code> when cancelled, also when it already was. <code>409 matched</code> with the <code>match_id</code> when a match took the ticket first; the request to leave is recorded on the ticket.</li>
+      <li><strong>Write a mode.</strong> <code>201</code> with the new version. <code>422</code> when a rule names a kind that is not in the library, lacks a setting or gives one of the wrong type.</li>
+    </ul>
+    <h3>Limits on the caller</h3>
+    <ul>
+      <li><strong>Who may join for whom.</strong> The caller must be one of the listed players. How the others agreed to be listed is the business of whatever forms parties, which is out of scope here.</li>
+      <li><strong>Retries.</strong> After a <code>503</code> the client waits with backoff and jitter, spread over 10 s, so that a region coming back from an outage is not met by every client in the same second (<a href="#load">behaviour under load</a>).</li>
+      <li><strong>Connections to the store.</strong> All API nodes of a region together use at most 128 connections for writes. With too few, joins queue behind each other: in the measurement the slowest 1% of joins took 27.6 ms on 128 connections and over 200 ms on 32.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="ticket-store" class="k-store" data-toc="Ticket store" data-num="2" data-nodes="store"
+  data-more2="why a relational database on three machines, the schema, who makes each change of state and under which condition, and one live ticket per player"
+  data-more3="example rows, the documents, the index list, the write that ends a ticket, ids, removing history, the replication setting, the measured throughput and choosing a database">
+  <div class="sh"><h2><span class="num">2</span>Ticket store</h2></div>
+  <p class="lede" data-req="NFR4">The ticket store is the single source of truth: every other component can crash and pick up from it, and a join it has acknowledged survives the loss of any one machine.</p>
+  <p data-req="NFR1">Each region has its own store: a relational database on three machines, in which a commit is acknowledged only once a second machine holds it too. A ticket moves through states: <code>waiting</code> → <code>matched</code> → <code>assigned</code>. A waiting ticket can instead end as <code>cancelled</code> or <code>expired</code>, and a matched ticket whose match gets no game server goes back to <code>waiting</code>. Every one of these moves is a single write that carries its own condition (“move it only if it is still in the state I expect”), so of two writers that want the same ticket only one can win.</p>
+  <figure><div class="scroll"><svg viewBox="0 0 660 186" style="min-width:560px" role="img" aria-label="Ticket states: waiting to matched when a match is committed, matched to assigned when a game server is reserved; matched back to waiting when no server comes within 10 seconds; waiting to cancelled when a player leaves; waiting to expired after 300 seconds without a match.">
+    <g style="--k:var(--muted)"><rect class="box" x="30" y="2" width="120" height="36" rx="9"/><text class="t" x="90" y="20" text-anchor="middle" dominant-baseline="central">cancelled</text></g>
+    <g style="--k:var(--muted)"><rect class="box" x="210" y="2" width="120" height="36" rx="9"/><text class="t" x="270" y="20" text-anchor="middle" dominant-baseline="central">expired</text></g>
+    <g class="k-store"><rect class="box" x="30" y="80" width="120" height="44" rx="9"/><text class="t" x="90" y="102" text-anchor="middle" dominant-baseline="central">waiting</text></g>
+    <g class="k-match"><rect class="box" x="270" y="80" width="120" height="44" rx="9"/><text class="t" x="330" y="102" text-anchor="middle" dominant-baseline="central">matched</text></g>
+    <g class="k-assign"><rect class="box" x="510" y="80" width="120" height="44" rx="9"/><text class="t" x="570" y="102" text-anchor="middle" dominant-baseline="central">assigned</text></g>
+    <path class="wire" marker-end="url(#ah)" d="M90 80V39"/><text class="s" x="84" y="63" text-anchor="end">leaves</text>
+    <path class="wire" marker-end="url(#ah)" d="M140 80 214 39"/><text class="s" x="190" y="68">300 s, no match</text>
+    <path class="wire" marker-end="url(#ah)" d="M150 102H269"/><text class="s" x="210" y="94" text-anchor="middle">match committed</text>
+    <path class="wire" marker-end="url(#ah)" d="M390 102H509"/><text class="s" x="450" y="94" text-anchor="middle">server reserved</text>
+    <path class="wire" marker-end="url(#ah)" d="M330 124V150Q330 156 324 156H96Q90 156 90 150V125"/><text class="s" x="210" y="174" text-anchor="middle">no server within 10 s: waiting time kept</text>
+  </svg></div>
+  <figcaption><code>assigned</code>, <code>cancelled</code> and <code>expired</code> are final. A match has three states of its own: <code>reserving</code> until a game server is reserved for it, then <code>ready</code>, or <code>dropped</code> if none came in time.</figcaption></figure>
+
+  <div data-l="2">
+    <h3>Why a relational database, and why three machines</h3>
+    <p>The design needs three things from its store: a commit that survives a machine, a write that changes a row only if the row is still in a given state, and a rule that one player has at most one live ticket. A relational database gives all three as ordinary features, so the guarantees can be read off the statements. PostgreSQL is the database this guide’s statements are written for.</p>
+    <div class="brief"><b>Brief: synchronous standby.</b> A standby is a database machine that receives every change as it happens. With synchronous commit, the main machine (the primary) answers “committed” only after a standby has the change on disk too. If the primary is lost, a standby has everything that was ever acknowledged.</div>
+    <p>The store runs a primary and two standbys, each in its own zone, and a commit waits for whichever standby answers first. Two standbys are there so that losing one machine, whichever it is, never leaves a commit waiting for a machine that is gone. The price is time: every commit waits for two disks. It is paid once per join and three times per match, and <a href="#load">behaviour under load</a> shows that it does not limit throughput.</p>
+    <h3>The schema</h3>
+    <figure><div class="schema">
+      <div><h4>tickets <small>one row per ticket</small></h4><ul><li>id <i class="pk">key</i></li><li>join_key <i>from the client, unique per creator</i></li><li>region</li><li>mode</li><li>mode_version <i>rule set the summary was built for</i></li><li>state <i>waiting, matched, assigned, cancelled, expired</i></li><li>size <i>players on the ticket</i></li><li>sort_key <i>fixed for one rule set version</i></li><li>summary <i>document, fixed for one rule set version</i></li><li>match_id <i>NULL unless matched or assigned</i></li><li>team <i>1 or 2</i></li><li>requeues <i>times sent back to waiting</i></li><li>end_reason</li><li>created_by</li><li>created_at <i>start of waiting, never changes</i></li><li>matched_at</li><li>assigned_at</li><li>leave_requested_at <i>a leave that came after the match</i></li><li>leave_requested_by</li><li>cancelled_at</li><li>cancelled_by</li><li>expired_at</li><li>updated_at</li></ul></div>
+      <div><h4>ticket_players <small>one row per player on a ticket</small></h4><ul><li>ticket_id <i class="pk">key</i></li><li>player_id <i class="pk">key</i></li><li>params <i>document from the client</i></li><li>attrs <i>document, copied at join</i></li><li>live <i>true while waiting or matched</i></li></ul></div>
+      <div><h4>matches <small>one row per match</small></h4><ul><li>id <i class="pk">key</i></li><li>region</li><li>mode</li><li>mode_version <i>rule set it was formed under</i></li><li>state <i>reserving, ready, dropped</i></li><li>formed_by <i>the owner’s node</i></li><li>rule_values <i>document</i></li><li>oldest_wait_s</li><li>reserve_deadline</li><li>claimed_by</li><li>claimed_until</li><li>reserve_attempts</li><li>last_error</li><li>server_address</li><li>drop_reason</li><li>created_at</li><li>ready_at</li><li>dropped_at</li><li>updated_at</li></ul></div>
+      <div><h4>match_tickets <small>every placement, kept when a match is dropped</small></h4><ul><li>match_id <i class="pk">key</i></li><li>ticket_id <i class="pk">key</i></li><li>team <i>1 or 2</i></li></ul></div>
+      <div><h4>modes <small>one row per version; rows are only added</small></h4><ul><li>mode <i class="pk">key</i></li><li>version <i class="pk">key</i></li><li>enabled</li><li>team_size</li><li>max_party_size</li><li>sort_attribute</li><li>rules <i>document: the rule set</i></li><li>ticket_ttl_s</li><li>reserve_deadline_s</li><li>created_at</li><li>created_by</li></ul></div>
+      <div><h4>pool_leases <small>one row per pool</small></h4><ul><li>region <i class="pk">key</i></li><li>mode <i class="pk">key</i></li><li>owner <i>NULL when released</i></li><li>expires_at</li><li>acquired_at</li><li>renewed_at</li></ul></div>
+    </div>
+    <figcaption><code>tickets</code> is the hot table: every join inserts into it and every match updates it. No column names an attribute of any game. What players bring (<code>attrs</code>), what a ticket adds up to (<code>summary</code>), a mode’s rule set (<code>rules</code>) and what the rules measured on a match (<code>rule_values</code>) are documents that only the rule library reads.</figcaption></figure>
+    <h3>Who changes a ticket, and under which condition</h3>
+    <div class="scroll"><table>
+      <tr><th>Change</th><th>Made by</th><th>Condition carried in the write</th></tr>
+      <tr><td>new → <code>waiting</code></td><td>API, on a join</td><td>No listed player is live on another ticket</td></tr>
+      <tr><td><code>waiting</code> → <code>matched</code></td><td>Matchmaker, in the match commit</td><td>Every ticket of the match is still <code>waiting</code>; otherwise the whole match is undone</td></tr>
+      <tr><td><code>matched</code> → <code>assigned</code></td><td>Assigner, when the server is reserved</td><td>The match is still <code>reserving</code></td></tr>
+      <tr><td><code>matched</code> → <code>waiting</code></td><td>Assigner, when the match is dropped</td><td>The match is still <code>reserving</code> and its deadline has passed</td></tr>
+      <tr><td><code>matched</code> → <code>cancelled</code></td><td>Assigner, when the match is dropped and a player had asked to leave</td><td>The match is still <code>reserving</code> and its deadline has passed</td></tr>
+      <tr><td><code>waiting</code> → <code>cancelled</code></td><td>API, for a player who leaves</td><td>The ticket is still <code>waiting</code></td></tr>
+      <tr><td><code>waiting</code> → <code>expired</code></td><td>The pool’s owner: at the time limit, when the mode is switched off, or when a new rule set reads an attribute the ticket’s players lack</td><td>The ticket is still <code>waiting</code>; at the time limit, also older than the limit</td></tr>
+    </table></div>
+    <p>A match changes in the same way: the matchmaker creates it as <code>reserving</code> in the transaction that takes its tickets, and an assigner moves it to <code>ready</code> or to <code>dropped</code>, each only while it is still <code>reserving</code>. A ticket sent back to <code>waiting</code> keeps its <code>created_at</code>, so it is still the oldest in its pool, and <code>requeues</code> counts how often that happened.</p>
+    <h3 id="one-live-ticket">One live ticket per player</h3>
+    <p>A player’s row in <code>ticket_players</code> is <code>live</code> while its ticket is <code>waiting</code> or <code>matched</code>. The store keeps a unique index on <code>player_id</code> that covers only live rows, so a second live row for the same player cannot be inserted, whichever API node tries and however the two joins are timed. Every write that ends a ticket (assigned, cancelled, expired) clears <code>live</code> on its players in the same transaction, which is what lets the player join again. A second unique index, on the creator and the join key, recognises a join that is sent twice.</p>
+    <h3 id="store-failover">Surviving the loss of a machine</h3>
+    <p>Losing a standby changes nothing a client can see: commits wait for the other one. Losing the primary stops the region’s store until a standby is promoted, which this design allows up to 60 s for. The failover manager promotes the standby that has received more of the primary’s log: every acknowledged commit reached at least one of the two, so the one that is further ahead has all of them. The other standby is then pointed at the new primary. During that time joins are answered with “try again”, owners form nothing and assigners reserve nothing. Every ticket acknowledged before the loss is on the new primary, with its waiting time, and the new primary still has a standby to wait for, so nothing accepted afterwards sits on one disk only. The lost machine is replaced without hurry. This is the one exception in NFR4.</p>
+  </div>
+  <div data-l="3">
+    <h3>Example rows</h3>
+    <div class="scroll"><table>
+      <tr><th>id</th><th>mode</th><th>state</th><th>size</th><th>sort_key</th><th>match_id</th><th>team</th><th>requeues</th><th>created_at</th></tr>
+      <tr><td>t_41</td><td>siege</td><td>matched</td><td>3</td><td>1540</td><td>m_7</td><td>1</td><td>0</td><td>20:15:03</td></tr>
+      <tr><td>t_42</td><td>siege</td><td>waiting</td><td>1</td><td>2310</td><td></td><td></td><td>1</td><td>20:14:20</td></tr>
+      <tr><td>t_43</td><td>siege</td><td>expired</td><td>2</td><td>610</td><td></td><td></td><td>0</td><td>20:10:01</td></tr>
+    </table></div>
+    <p><code>t_41</code> is the three friends, placed on team 1 of match <code>m_7</code>, which is still <code>reserving</code>. <code>t_42</code> was in a match that got no server and is waiting again with its original <code>created_at</code>. <code>t_43</code> found no match in 300 s; its <code>end_reason</code> is <code>ttl</code>.</p>
+    <h3>The documents</h3>
+<pre data-lang="json"><code>ticket_players.attrs, one player of t_41
+{ "class": "heavy", "combat_rating": 6, "skill": 1540 }
+
+tickets.summary of t_41
+{
+  "skill":         { "min": 1480, "max": 1540, "sum": 4530 },
+  "combat_rating": { "min": 5, "max": 6, "sum": 17 },
+  "class":         { "counts": { "heavy": 1, "scout": 1, "support": 1 } }
+}</code></pre>
+    <p>The summary has one entry per attribute: the lowest value, the highest and the sum for a number, and a count per value for a label. A number that some rule also reads value by value carries the counts as well. For a number that a rule reads once per ticket, a party counting as its highest value, <code>max</code> is that value. The summary is computed at the join for the rule set version then in force and rebuilt only when the mode’s rule set changes, so an owner can form matches from <code>tickets</code> alone without reading <code>ticket_players</code>.</p>
+    <h3>Indexes and who reads them</h3>
+<pre data-lang="sql"><code>CREATE INDEX tickets_waiting ON tickets (region, mode, created_at) WHERE state = 'waiting';   -- the owner's read, the expiry
+CREATE INDEX tickets_match ON tickets (match_id) WHERE match_id IS NOT NULL;                  -- ready, drop, the match view
+CREATE UNIQUE INDEX one_live_ticket ON ticket_players (player_id) WHERE live;                 -- one live ticket per player
+CREATE INDEX matches_reserving ON matches (created_at) WHERE state = 'reserving';             -- the assigner's claim
+CREATE UNIQUE INDEX one_ticket_per_join ON tickets (created_by, join_key);                    -- a join sent twice
+CREATE INDEX players_tickets ON ticket_players (player_id, ticket_id);                        -- the caller's most recent ticket</code></pre>
+    <p>The first four are partial indexes: each covers only the rows that match its <code>WHERE</code>. The first stays as small as the number of waiting tickets, about 6,000 in the busiest region, however much history the table holds.</p>
+    <h3>The write that ends a ticket</h3>
+<pre data-lang="sql"><code>BEGIN;                                                        -- cancel
+UPDATE tickets SET state = 'cancelled', end_reason = 'player', cancelled_by = ?,
+       cancelled_at = now(), updated_at = now()
+WHERE id = ? AND state = 'waiting';
+UPDATE ticket_players SET live = false WHERE ticket_id = ? AND live;
+COMMIT;</code></pre>
+    <p>If the first statement changes no row, the ticket is no longer <code>waiting</code>: the API rolls back and reads the ticket. If it was already cancelled, the answer is <code>200</code>. If it is <code>matched</code>, the API records the request with a second guarded write and answers <code>409</code> with the match:</p>
+<pre data-lang="sql"><code>UPDATE tickets SET leave_requested_at = now(), leave_requested_by = ?, updated_at = now()   -- a leave that came too late
+WHERE id = ? AND state = 'matched';</code></pre>
+    <p>If this write changes no row either, the match was readied or dropped in between. The API reads the ticket once more and repeats the cancel, if the ticket is waiting again, or answers with the game server it now has. The assigner’s drop reads the mark (<a href="#assigner">assigner</a>). <code>end_reason</code> is <code>player</code> for a cancelled ticket, with <code>cancelled_by</code> holding the player’s id; for an expired ticket it is <code>ttl</code>, <code>mode_disabled</code> or <code>rules_changed</code>. A dropped match records <code>drop_reason</code>: <code>no_server</code> or <code>fleet_error</code>.</p>
+    <h3>Details that matter</h3>
+    <ul>
+      <li><strong>Ids ordered by time.</strong> Ticket and match ids are version 7 UUIDs, whose first bits are a timestamp, so new rows land at the end of the key’s index. PostgreSQL 18 generates them with <code>uuidv7()</code>; older versions get them from the API. The examples show short ids such as <code>t_41</code> for readability.</li>
+      <li><strong>Removing history.</strong> Rows are kept for 7 days. A scheduled job deletes older ones in small batches: in the busiest region about 200 tickets a second on average, with their players, placements and matches, 675 rows a second. That is small next to the 16,500 row writes a second of an event start.</li>
+      <li><strong>The database’s clock.</strong> Every statement that compares a time uses <code>now()</code>, which in PostgreSQL is the start time of the current transaction on the database machine. No decision depends on the clock of an API node, a matchmaker node or an assigner.</li>
+      <li><strong>Measured throughput.</strong> On the prototype described under <a href="#estimates">capacity estimates</a>, this schema carried the whole life of a ticket (join, match, claim, result) at 8,168 tickets a second on 128 connections and 15,280 on 256, against 2,400 needed at an event start. Joins held at 2,400 a second were answered in 9.5 ms at the median and 27.6 ms for the slowest 1%.</li>
+      <li><strong>The setting.</strong> In PostgreSQL the two standbys are named in <code>synchronous_standby_names</code> as <code>ANY 1 (…)</code>, with <code>synchronous_commit = on</code>: a commit then waits for any one of them, which is why a failover has to promote the standby that is further ahead. The measurement ran one standby; waiting for the faster of two is no slower.</li>
+      <li><strong>Another database.</strong> MySQL 8 has no index with a <code>WHERE</code>. The usual substitute for the unique index is a generated column that holds the player’s id while the row is live and <code>NULL</code> otherwise, with a unique index on it; a unique index there allows many <code>NULL</code>s.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="matchmaker" class="k-match" data-toc="Matchmaker" data-num="3" data-nodes="match store"
+  data-more2="why the obvious designs fail, the lease and the takeover, why no fencing is needed with a sequence diagram, what an owner does in one round, where the second goes, and racing workers compared"
+  data-more3="the lease, read, commit and expiry statements, what happens when a round goes wrong, the steps when one owner is not enough, and tuning">
+  <div class="sh"><h2><span class="num">3</span>Matchmaker</h2></div>
+  <p class="lede" data-req="NFR3">The matchmaker turns each pool’s waiting tickets into matches, once a second. Several matchmaker nodes must run so that one can die. The difficulty is that two nodes working on the same pool would keep picking the same tickets, and all but one of them would work for nothing.</p>
+  <p data-req="NFR4">The answer is one owner per pool, held by a lease: a lock that expires unless its holder renews it. The owner keeps nothing between rounds. Every second it reads the pool’s waiting tickets afresh, forms matches in memory and commits them, so a node that takes over a pool starts from exactly what the store says. The lease is there for speed only. If two nodes ever believe they own the same pool, the condition in the match commit lets only one of them take each ticket.</p>
+  <figure><div class="flow">
+    <div class="nd k-store"><b>Ticket store</b><small>the pool’s waiting tickets</small></div><span class="ar" aria-hidden="true">→</span>
+    <div class="nd k-match"><b>Owner of the pool</b><small>forms matches in memory</small></div><span class="ar" aria-hidden="true">→</span>
+    <div class="tx k-store"><small>one transaction per match</small>
+      <div class="nd k-store"><b>match</b><small>new, reserving</small></div>
+      <div class="nd k-store"><b>its tickets</b><small>matched, if all still waiting</small></div></div>
+  </div>
+  <figcaption>One round of an owner, repeated every second. Nothing is carried from one round to the next, so there is nothing to recover when the owner changes.</figcaption></figure>
+
+  <div data-l="2">
+    <h3>Why the obvious designs fail</h3>
+    <ul>
+      <li><strong>One matchmaker node</strong> is a single point of failure: while it is down, nobody in the region is matched.</li>
+      <li><strong>Every node works on every pool.</strong> The nodes read the same tickets and form overlapping matches. In a test with two such workers, 135 of the second worker’s 135 <code>siege</code> matches shared a ticket with one of the first worker’s and had to be thrown away. The table under “One owner against racing workers” has the full comparison.</li>
+    </ul>
+    <h3>The lease</h3>
+    <div class="brief"><b>Brief: lease.</b> A lock with an expiry time. The holder must renew it before it expires; if the holder dies, the lease runs out by itself and another node can take it. Unlike a plain lock, a crashed holder cannot block everyone for ever.</div>
+    <p>Each pool has one row in the store’s <code>pool_leases</code> table: its owner and the time the lease expires. The row is created together with the first version of the mode. The owner renews every 2 s for another 6 s. The other matchmaker nodes are spares: once a second each checks for pools whose lease has run out and tries to take one. A region has three pools (one per mode) and three or more matchmaker nodes, so every pool has an owner and a spare.</p>
+    <div class="formula">takeover after an owner dies: 6 s + 1 s + 1 s = 8 s</div>
+    <p data-req="NFR4">The three terms are the lease running out, the spare’s next check and the new owner’s first round. That is inside the 10 s of NFR4, and no ticket is touched: the dead owner held nothing that the store does not have.</p>
+    <h3>Why the lease needs no fencing</h3>
+    <p>A node can be paused (a long garbage collection, a frozen virtual machine) and wake up after its lease passed to another node, still believing it owns the pool. Many designs must then reject its writes with a fencing token, a number that grows each time ownership changes. This design does not need one, because being the owner is never what makes a write valid. A match commit is valid only if every one of its tickets is still <code>waiting</code>, and that is checked by the write itself.</p>
+    <figure class="steps">
+      <div class="scroll"><svg viewBox="0 0 720 330" style="min-width:600px" role="img" aria-label="Sequence: owner A reads the pool and is paused; its lease runs out; owner B takes the lease and commits match m_7 with ticket t_41; owner A wakes and tries to commit match m_9 with the same ticket; the store changes only 23 of 24 tickets, so A rolls back; A’s lease renewal changes no row and A stops.">
+        <g class="k-match"><rect class="box" x="20" y="10" width="120" height="34" rx="8"/><text class="t" x="80" y="27" text-anchor="middle" dominant-baseline="central">Owner A</text></g>
+        <g class="k-store"><rect class="box" x="300" y="10" width="120" height="34" rx="8"/><text class="t" x="360" y="27" text-anchor="middle" dominant-baseline="central">Ticket store</text></g>
+        <g class="k-match"><rect class="box" x="580" y="10" width="120" height="34" rx="8"/><text class="t" x="640" y="27" text-anchor="middle" dominant-baseline="central">Node B</text></g>
+        <path d="M80 44V320M360 44V320M640 44V320" stroke="var(--line)" stroke-width="1.2" stroke-dasharray="4 4"/>
+        <g data-s="1"><path class="wire" marker-end="url(#ah)" d="M80 78H358"/><text class="s" x="220" y="70" text-anchor="middle">reads the pool: t_41 is waiting</text></g>
+        <g data-s="2"><rect x="66" y="92" width="28" height="118" rx="5" fill="color-mix(in srgb,var(--mark) 55%,var(--surface))" stroke="var(--amber)"/><text class="s" x="102" y="128">paused for 9 s;</text><text class="s" x="102" y="143">the lease runs out</text></g>
+        <g data-s="3"><path class="wire" marker-end="url(#ah)" d="M640 128H362"/><text class="s" x="500" y="120" text-anchor="middle">takes the lease ✓</text></g>
+        <g data-s="4"><path class="wire" marker-end="url(#ah)" d="M640 178H362"/><text class="s" x="500" y="162" text-anchor="middle">commits match m_7 with t_41:</text><text class="s" x="500" y="196" text-anchor="middle">24 of 24 tickets changed ✓</text></g>
+        <g data-s="5"><path marker-end="url(#ahb)" d="M80 238H358" stroke="var(--bad)" stroke-width="1.3" fill="none"/><text class="s" x="220" y="230" text-anchor="middle" style="fill:var(--bad)">commits match m_9, which also holds t_41</text><path marker-end="url(#ahb)" d="M360 266H82" stroke="var(--bad)" stroke-width="1.3" fill="none" stroke-dasharray="5 4"/><text class="s" x="220" y="258" text-anchor="middle" style="fill:var(--bad)">23 of 24 tickets changed: A rolls back</text></g>
+        <g data-s="6"><path marker-end="url(#ahb)" d="M80 304H358" stroke="var(--bad)" stroke-width="1.3" fill="none"/><text class="s" x="220" y="296" text-anchor="middle" style="fill:var(--bad)">renews the lease: no row changed, A stops</text></g>
+      </svg></div>
+      <figcaption>Read top to bottom as time passing, or press Play to step through it. Ticket <code>t_41</code> ends in exactly one match, and the 23 other tickets of the rolled-back match are still <code>waiting</code>. No write was rejected because of who sent it, only because of what it found.</figcaption>
+      <ol class="stepnotes">
+        <li>Owner A starts a round and reads the pool. Ticket t_41 is among the waiting tickets.</li>
+        <li>A is paused for 9 s. Its lease, which lasts 6 s, runs out while it sleeps.</li>
+        <li>Node B, a spare, sees the expired lease and takes it. B is now the owner.</li>
+        <li>B reads the pool, forms match m_7 with t_41 in it and commits. All 24 tickets were still waiting, so all 24 are now matched.</li>
+        <li>A wakes with matches formed from its old read. Match m_9 also holds t_41. Its commit changes only 23 of 24 tickets, because t_41 is no longer waiting, so A rolls the whole match back.</li>
+        <li>A’s next renewal changes no row, because the lease names B. A stops working on the pool.</li>
+      </ol>
+    </figure>
+    <h3>One round</h3>
+    <ol>
+      <li><strong>Read the rules.</strong> The owner reads the newest version of the mode’s rule set.</li>
+      <li><strong>Read the pool.</strong> One query returns every <code>waiting</code> ticket of the pool, oldest first, with its size, sort key and summary. Tickets whose summary was built for an older version of the rule set are rebuilt first, at most 500 in a round; the rest of them sit this round out.</li>
+      <li><strong>Expire.</strong> Tickets older than the mode’s time limit (300 s) are moved to <code>expired</code>, with the usual condition that they are still <code>waiting</code>.</li>
+      <li><strong>Look at the fleet’s backlog.</strong> If more than 2,000 of the pool’s matches are still <code>reserving</code>, the owner forms nothing this round, so that a slow fleet shows up as waiting and not as matches dropped wholesale.</li>
+      <li><strong>Form.</strong> The owner forms as many matches as the rules allow, in memory, starting from the oldest ticket (<a href="#forming-a-match">forming a match</a>). It gives itself 500 ms; what it has not reached by then waits for the next round.</li>
+      <li><strong>Commit.</strong> Each match is one transaction. The matches of one round share no ticket, so the owner commits them side by side on 16 connections.</li>
+    </ol>
+    <h3>Where the second goes</h3>
+    <p>The worst case is the busiest pool after an event start in which nothing was matched for 10 s: 18,000 waiting tickets. The first three times are the measured inputs listed under <a href="#estimates">capacity estimates</a>, scaled from the 14,400 tickets they were measured for.</p>
+    <div class="scroll"><table>
+      <tr><th>Part of the round</th><th>Time</th><th>Where it comes from</th></tr>
+      <tr><td>Read the pool</td><td>56 ms</td><td>45 ms for 14,400 tickets</td></tr>
+      <tr><td>Decode the summaries</td><td>50 ms</td><td>40 ms for 14,400</td></tr>
+      <tr><td>Form the matches</td><td>63 ms</td><td>50 ms for 14,400, on one core, example rule set</td></tr>
+      <tr><td>Commit the matches</td><td>469 ms</td><td>18,000 tickets are 750 <code>siege</code> matches of 24 tickets; a commit takes 10 ms; 16 run at a time</td></tr>
+      <tr><td>Total</td><td>638 ms</td><td>Of the 1,000 ms of a round</td></tr>
+    </table></div>
+    <p data-req="NFR3">The matching logic is the smallest part, and the commit is the largest. That is why commits run side by side: one connection finishes 100 commits a second, fewer than the 150 matches a second the <code>duel</code> pool of the busiest region forms at an event start, while 16 connections finish 1,600. At the evening peak the busiest <code>siege</code> pool holds 3,600 tickets, and forming takes about 9 ms.</p>
+    <h3>One owner against racing workers</h3>
+    <div class="scroll"><table>
+      <tr><th></th><th>One owner per pool</th><th>Workers that race</th></tr>
+      <tr><td>Is it safe?</td><td>Yes: the condition in the match commit</td><td>Yes: the same condition</td></tr>
+      <tr><td>When a node dies</td><td>The pool pauses for at most 8 s</td><td>Nothing pauses; the others carry on</td></tr>
+      <tr><td>Work per round</td><td>One read, one forming run</td><td>One of each per worker</td></tr>
+      <tr><td>What a second node adds</td><td>A spare</td><td>Almost nothing. Measured: 135 of 135 <code>siege</code> matches, 190 of 191 <code>skirmish</code> and 293 of 293 <code>duel</code> matches of the second worker shared a ticket with the first worker’s and were rolled back</td></tr>
+      <tr><td>Load on the store</td><td>Every commit succeeds</td><td>Every lost commit locks rows and rolls back</td></tr>
+    </table></div>
+    <p>Racing loses nearly everything because each worker’s matches cover over 90% of the pool, and a <code>siege</code> match holds 24 tickets, any one of which can collide. Racing adds matches only when the workers are kept on different tickets, and then they are no longer racing: each has a part of the pool to itself. At that point there is no race left, only several owners.</p>
+  </div>
+  <div data-l="3">
+    <h3>The lease statements</h3>
+<pre data-lang="sql"><code>INSERT INTO pool_leases (region, mode) VALUES (?, ?)          -- with the first version of a mode
+ON CONFLICT DO NOTHING;
+
+UPDATE pool_leases                                            -- claim
+SET owner = ?, expires_at = now() + interval '6 seconds', acquired_at = now(), renewed_at = now()
+WHERE region = ? AND mode = ? AND (owner IS NULL OR expires_at &lt; now());
+
+UPDATE pool_leases                                            -- renew, every 2 s
+SET expires_at = now() + interval '6 seconds', renewed_at = now()
+WHERE region = ? AND mode = ? AND owner = ? AND expires_at &gt; now();
+
+UPDATE pool_leases SET owner = NULL                           -- release, on a clean shutdown
+WHERE region = ? AND mode = ? AND owner = ?;</code></pre>
+    <p>Each is one statement, so each is its own transaction and <code>now()</code> is the store’s clock. A claim or a renewal that changes no row tells the node it does not own the pool: after a failed claim it stays a spare, after a failed renewal it stops its rounds at once. Renewal runs on its own timer and its own connection, so a long round cannot let the lease run out.</p>
+    <h3>Reading the pool and committing a match</h3>
+<pre data-lang="sql"><code>SELECT id, size, sort_key, summary, mode_version, created_at  -- read the pool
+FROM tickets
+WHERE region = ? AND mode = ? AND state = 'waiting'
+ORDER BY created_at;
+
+BEGIN;                                                        -- commit one match
+INSERT INTO matches (id, region, mode, mode_version, state, formed_by, rule_values, oldest_wait_s,
+                     reserve_deadline, created_at, updated_at)
+VALUES (?, ?, ?, ?, 'reserving', ?, ?, ?, now() + interval '10 seconds', now(), now());
+UPDATE tickets SET state = 'matched', match_id = ?, team = 1, matched_at = now(), updated_at = now()
+WHERE id IN (?, ?, ?) AND state = 'waiting' AND mode_version = ?;   -- team 1: the guard is in the write
+UPDATE tickets SET state = 'matched', match_id = ?, team = 2, matched_at = now(), updated_at = now()
+WHERE id IN (?, ?, ?) AND state = 'waiting' AND mode_version = ?;   -- team 2
+INSERT INTO match_tickets (match_id, ticket_id, team) VALUES (?, ?, 1), (?, ?, 2);
+COMMIT;                                                       -- only if the two updates changed every ticket</code></pre>
+    <p data-req="NFR1">The owner adds up the rows the two updates changed. If the sum is the number of tickets in the match, it commits. If it is smaller, some ticket was cancelled, expired, rebuilt for a newer rule set or taken by another match since the read, and the owner rolls back: the match never existed and its other tickets stay <code>waiting</code> for the next round. Under PostgreSQL’s default isolation level, <code>READ COMMITTED</code>, an update that meets a row another transaction is changing waits for that transaction and then checks its <code>WHERE</code> again against the new row, which is exactly what makes the second writer lose.</p>
+<pre data-lang="sql"><code>UPDATE tickets                                                -- expire
+SET state = 'expired', end_reason = 'ttl', expired_at = now(), updated_at = now()
+WHERE region = ? AND mode = ? AND state = 'waiting' AND created_at &lt; now() - interval '300 seconds'
+RETURNING id;</code></pre>
+    <p>The players of the returned tickets get <code>live = false</code> in the same transaction, as for a cancel.</p>
+    <h3>When a round goes wrong</h3>
+    <ul>
+      <li><strong>The round cannot finish in its second</strong> (a backlog after an outage, a costly rule set). Forming stops at its 500 ms deadline, the owner commits what it has and starts the next round on time. Tickets are taken oldest first, so the ones left over are the newest. With forming at its deadline and the worst pool, a round takes 56 + 50 + 500 + 469 = 1,075 ms. Rounds never overlap, so the next one starts 75 ms late.</li>
+      <li><strong>The rule set changed while tickets waited.</strong> A ticket’s <code>mode_version</code> says which version its summary was built for. When it is behind, the owner reads the ticket’s players, builds the summary and the sort key again and stores them, on the condition that the ticket is still <code>waiting</code> with the old version. It does this before forming and outside the 500 ms, for at most 500 tickets a round, so a pool of 3,600 is through in 8 rounds; a ticket not yet rebuilt is left out of forming until it is. If the players lack an attribute the new rules read, the ticket is expired with <code>end_reason = 'rules_changed'</code>. An owner that keeps decoded summaries between rounds must key them by ticket and version.</li>
+      <li><strong>The owner runs an older build</strong> that does not know a kind of rule in the newest version. It cannot judge tickets built for that version, so it releases the pool’s lease and raises an alert. A node checks that it can load a pool’s newest rule set before it claims that pool, so the released lease goes to a node on a newer build and not to another old one. If no node can load the version, the pool forms nothing and its tickets expire at 300 s, each with a definite answer.</li>
+      <li><strong>A rule fails while judging</strong> (a fault in a new kind’s code). The search for that one match is abandoned and counted, and the others go on. An alert fires for any pool that has tickets waiting and formed no match for 10 s.</li>
+    </ul>
+    <h3 id="more-than-one-owner">When one owner is not enough</h3>
+    <p>With the example rule set, forming the worst pool uses 63 ms of a 500 ms allowance: 8 times the room it needs. A rule set can cost far more; one that demands teams exactly equal at every combat rating level took 378 ms for 14,400 tickets, which is about 470 ms for the worst pool of 18,000. The steps, in the order they would be taken:</p>
+    <ol>
+      <li><strong>The deadline.</strong> Nothing changes until forming reaches 500 ms. Past that the round still ends on time and the newest tickets wait one round more.</li>
+      <li><strong>More cores, same owner.</strong> The owner cuts the pool’s tickets, already sorted by sort key, into disjoint chunks and forms each chunk on its own core. Chunks share no ticket, so two cores can never pick the same one. On every other round the cuts move by half a chunk, so a ticket next to a cut is not stuck there. A pool is cut only while each chunk still holds at least 2,000 tickets, so a thin pool is never divided. Measured at 100,000 tickets: 8 chunks take 61 ms instead of 269 ms and match 99.3% of the players in the round instead of 99.4%.</li>
+      <li><strong>More machines.</strong> The lease is taken per chunk instead of per pool, with the chunk’s bounds stored in its lease row. Nothing else changes, because safety never came from the lease. It is not built here: nothing in this design’s numbers needs it.</li>
+    </ol>
+    <h3>Tuning</h3>
+    <ul>
+      <li><strong>Lease length</strong> trades takeover time against false takeovers. 6 s with a renewal every 2 s survives two lost renewals. A shorter lease takes over sooner and hands pools back and forth when the store is slow.</li>
+      <li><strong>Round length</strong> sets the shortest possible wait. One second is a floor on waiting that players do not notice and leaves the store one read per pool per second.</li>
+      <li><strong>Commit connections</strong> per owner: 16 covers the worst pool in 469 ms. More helps only if the store has the connections to give.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="forming-a-match" class="k-match" data-toc="Forming a match" data-sub="1" data-nodes="match"
+  data-more2="what is computed once at the join, the four steps with a figure, how a limit widens, and why the oldest ticket goes first"
+  data-more3="the engine in Go, its bounds, and the measured time per round">
+  <div class="sh"><h2>Inside the matchmaker: forming a match</h2></div>
+  <p class="lede">Forming a match means choosing, from thousands of waiting tickets, a set that exactly fills two teams and breaks no rule. Trying every combination is out of the question, so the engine builds one match at a time around the ticket that has waited longest.</p>
+  <p data-req="FR5 NFR2">It adds the nearest tickets that every rule lets in (in the example game, nearest in skill rating) until the player count is exact. It places them on two teams, each ticket whole, so a party is never split. Then it swaps tickets between the teams for as long as a swap brings the match closer to meeting every rule. A match is committed only when every rule is met. If the engine finds none, the ticket waits for the next round, when limits that widen with waiting give it more candidates. The engine can miss a match that exists, but it never forms one that breaks a rule.</p>
+  <figure>
+    <div class="ctl"><label for="waited">Seconds the oldest ticket has waited</label><input type="range" id="waited" min="0" max="40" value="0"><output id="waitedv" for="waited">0 s</output></div>
+    <div class="pool" id="pool" aria-hidden="true"><span class="ax" style="left:0">skill rating 1,900</span><span class="ax" style="right:0">2,600</span></div>
+    <figcaption><span id="poolcap" aria-live="polite">After 0 s the limit is 100 points. Only 6 of the 10 players a skirmish match needs fit inside it, so the oldest ticket keeps waiting and the limit keeps growing.</span> Each dot is a waiting <code>skirmish</code> ticket of one player, placed by skill rating. The marked one has waited longest and is a strong player with few others near. Move the slider to let it wait: the limit on how far apart skill ratings may be grows by 10 points a second, and the bracket shows the players chosen so far.</figcaption>
+  </figure>
+
+  <div data-l="2">
+    <h3>Computed once, at the join</h3>
+    <p>The engine never looks at single players. When a ticket is created, the rule library reduces its players’ attributes to three things, stored on the ticket: its <code>size</code> (how many players), its <code>sort_key</code> (its value of the attribute the mode sorts by; in the example game the highest skill rating among its players) and its <code>summary</code> (for each attribute the lowest value, the highest and the sum, or a count per value). A party is one entry with one summary, which is what keeps it together. The three stay as they are for as long as the mode’s rule set does; when operators change the rule set, the owner computes them again.</p>
+    <h3>The four steps</h3>
+    <figure class="steps">
+      <div class="scroll"><svg viewBox="0 0 720 266" style="min-width:620px" role="img" aria-label="Forming one skirmish match in four steps. Eleven waiting tickets in a row by skill rating. Step one: the ticket that has waited longest is the anchor. Step two: the nearest tickets are added until there are 10 players; one ticket is passed over because a rule says no. Step three: the tickets are placed on two teams and the class rule gives a penalty of 2. Step four: one swap brings the penalty to 0 and the match is committed.">
+        <g style="--k:var(--muted)">
+          <circle class="box" cx="70" cy="56" r="12"/><circle class="box" cx="128" cy="56" r="12"/><circle class="box" cx="186" cy="56" r="12"/><circle class="box" cx="244" cy="56" r="12"/><circle class="box" cx="302" cy="56" r="12"/><circle class="box" cx="360" cy="56" r="12"/><circle class="box" cx="418" cy="56" r="12"/><circle class="box" cx="476" cy="56" r="12"/><circle class="box" cx="534" cy="56" r="12"/><circle class="box" cx="592" cy="56" r="12"/><circle class="box" cx="650" cy="56" r="12"/>
+        </g>
+        <text class="s" x="70" y="86" text-anchor="middle">1,410</text><text class="s" x="128" y="86" text-anchor="middle">1,440</text><text class="s" x="186" y="86" text-anchor="middle">1,455</text><text class="s" x="244" y="86" text-anchor="middle">1,470</text><text class="s" x="302" y="86" text-anchor="middle">1,480</text><text class="s" x="360" y="86" text-anchor="middle">1,490</text><text class="s" x="418" y="86" text-anchor="middle">1,500</text><text class="s" x="476" y="86" text-anchor="middle">1,515</text><text class="s" x="534" y="86" text-anchor="middle">1,540</text><text class="s" x="592" y="86" text-anchor="middle">1,585</text><text class="s" x="650" y="86" text-anchor="middle">1,650</text>
+        <text class="s" x="244" y="34" text-anchor="middle">party of 2</text>
+        <g data-s="1"><circle cx="360" cy="56" r="12" fill="color-mix(in srgb,var(--mark) 70%,var(--surface))" stroke="var(--ink)" stroke-width="1.6"/><text class="s" x="360" y="18" text-anchor="middle">anchor: waited 9 s, so skill may span 190</text><path class="wire" marker-end="url(#ah)" d="M360 24V42"/></g>
+        <g data-s="2" class="k-match">
+          <circle class="box" cx="70" cy="56" r="12"/><circle class="box" cx="128" cy="56" r="12"/><circle class="box" cx="186" cy="56" r="12"/><circle class="box" cx="244" cy="56" r="12"/><circle class="box" cx="302" cy="56" r="12"/><circle class="box" cx="418" cy="56" r="12"/><circle class="box" cx="534" cy="56" r="12"/><circle class="box" cx="592" cy="56" r="12"/>
+          <circle cx="476" cy="56" r="12" fill="var(--surface)" stroke="var(--bad)" stroke-width="1.4" stroke-dasharray="4 3"/>
+          <text class="s" x="476" y="104" text-anchor="middle" style="fill:var(--bad)">a rule says no</text>
+          <path d="M58 112V118H604V112" stroke="var(--match)" stroke-width="1.3" fill="none"/><text class="s" x="300" y="134" text-anchor="middle">10 players on 9 tickets, skill spans 175</text>
+        </g>
+        <g class="k-match"><rect class="box" x="110" y="150" width="230" height="84" rx="9"/><text class="t" x="225" y="170" text-anchor="middle">Team 1</text></g>
+        <g class="k-match"><rect class="box" x="380" y="150" width="230" height="84" rx="9"/><text class="t" x="495" y="170" text-anchor="middle">Team 2</text></g>
+        <g data-s="3"><text class="s" x="225" y="192" text-anchor="middle">split: 3 heavy, 0 scout</text><text class="s" x="495" y="192" text-anchor="middle">split: 1 heavy, 2 scout</text><text class="s" x="225" y="256" text-anchor="middle">class counts differ by 2 and 2: penalty 2</text></g>
+        <g data-s="4"><text class="s" x="225" y="214" text-anchor="middle">one swap: 2 heavy, 1 scout</text><text class="s" x="495" y="214" text-anchor="middle">one swap: 2 heavy, 1 scout</text><path class="wire" marker-end="url(#ah)" d="M342 186H378"/><path class="wire" marker-end="url(#ah)" d="M378 200H342"/><text class="s" x="495" y="256" text-anchor="middle">penalty 0: the match is committed</text></g>
+      </svg></div>
+      <figcaption>Eleven waiting <code>skirmish</code> tickets in a row, by skill rating. Press Play to step through the four steps, or read the figure top to bottom. The rules decide twice: which tickets may join the selection, and whether the finished teams are acceptable.</figcaption>
+      <ol class="stepnotes">
+        <li>Anchor. The ticket that has waited longest goes first. It has waited 9 s, so the skill limit stands at 190 points.</li>
+        <li>Fill. Tickets are tried nearest first. One is passed over because a rule says it cannot fit: its combat rating is too far from the others. Nine tickets, one of them a party of 2, give exactly 10 players.</li>
+        <li>Split. The tickets are placed on two teams of 5, each ticket whole. The class rule finds 3 heavy against 1 and 0 scout against 2: a penalty of 2.</li>
+        <li>Swap. Exchanging a heavy for a scout gives both teams 2 heavy and 1 scout. Every rule now answers 0, so the match is committed.</li>
+      </ol>
+    </figure>
+    <ol>
+      <li><strong>Anchor.</strong> Take the longest-waiting ticket that is not yet in a match this round. Its waiting time sets every limit that widens.</li>
+      <li><strong>Fill.</strong> Walk outwards from the anchor along the sort key, nearest first. Add a ticket when every rule says it can still fit and the players do not exceed two teams. Stop when the count is exact.</li>
+      <li><strong>Split.</strong> Place the tickets on two teams, largest tickets first, each ticket whole.</li>
+      <li><strong>Swap.</strong> While some rule still gives a penalty, exchange the two tickets of equal size, one from each team, that lower the total penalty most. Commit at 0.</li>
+    </ol>
+    <p>If the swaps end above 0, the engine drops the ticket it added last, takes the next candidate and tries again, a bounded number of times. Then it gives up on this anchor for this round and moves to the next-oldest ticket.</p>
+    <h3>How a limit widens</h3>
+    <p data-req="NFR3">A limit in a rule can be a fixed number or one that grows with the anchor’s waiting time. The example game’s skill limit starts at 100 points and grows by 10 points a second up to 400:</p>
+    <div class="formula">after 12 s: 100 + 10 × 12 = 220 points<br>reaches its cap after: (400 − 100) ÷ 10 = 30 s</div>
+    <p>So a ticket in a busy part of the pool is matched in its first round against players within 100 points, and a ticket with few neighbours trades evenness for time, by a known amount per second, and stops trading at 400. The combat rating limit never widens: a difference of more than 2 levels is not a match the example game wants at any waiting time. A ticket that is still unmatched at 300 s expires.</p>
+    <h3>Why the oldest ticket goes first</h3>
+    <p>Starting every match from the longest-waiting ticket has three effects. Nobody is overtaken for ever by newer tickets. The widest limits are applied where they are needed, around the ticket that earned them. And when a round runs out of time, the tickets it did not reach are the newest ones.</p>
+  </div>
+  <div data-l="3">
+    <h3>The engine</h3>
+<pre data-lang="go"><code>// One round over a pool, abridged. tickets is sorted by sort key.
+func round(tickets []Ticket, rules []Rule, teamSize int, deadline time.Time) []Match {
+	used := make([]bool, len(tickets))
+	var out []Match
+	for _, a := range oldestFirst(tickets) {
+		if used[a] || time.Now().After(deadline) {
+			continue
+		}
+		wait := tickets[a].Wait.Seconds()
+		sel := newSelection(a, tickets[a])
+		next := nearestFirst(tickets, a, used) // walks outwards from the anchor
+		for tries := 0; tries &lt;= 8; tries++ {
+			for sel.Players &lt; 2*teamSize {
+				c, ok := next()
+				if !ok {
+					break
+				}
+				if sel.Players+tickets[c].Players &lt;= 2*teamSize &amp;&amp; fitsAll(rules, sel, tickets[c], wait) {
+					sel.Add(c, tickets[c])
+				}
+			}
+			if sel.Players &lt; 2*teamSize {
+				break // too few candidates: the anchor waits for the next round
+			}
+			if m, ok := split(sel, rules, teamSize, wait); ok {
+				for _, i := range sel.Tickets {
+					used[i] = true
+				}
+				out = append(out, m)
+				break
+			}
+			sel.DropLast() // replace the last-added ticket by the next candidate
+		}
+	}
+	return out
+}
+
+func split(sel *Selection, rules []Rule, teamSize int, wait float64) (Match, bool) {
+	a, b, ok := placeLargestFirst(sel, teamSize) // each ticket whole: a party is never split
+	if !ok {
+		return Match{}, false
+	}
+	p := penalty(rules, sel, a, b, wait)
+	for swaps := 0; swaps &lt; 40 &amp;&amp; p &gt; 0; swaps++ {
+		i, j, q := bestSwap(rules, sel, a, b, wait) // equal-sized tickets, one from each team
+		if q &gt;= p {
+			break
+		}
+		a.Swap(i, b, j)
+		p = q
+	}
+	return Match{TeamA: a, TeamB: b}, p == 0
+}</code></pre>
+    <p>The engine names no attribute and no game. <code>duel</code> runs through the same code with a team size of 1 and a rule set that has no team rules; nothing in the engine is special for it. The search (fill, split, swap) is one step that can be replaced: given the candidates and the rules, return a match with penalty 0 or nothing.</p>
+    <h3>Bounds</h3>
+    <ul>
+      <li><strong>At most 40 swaps</strong> per split and <strong>8 replacements</strong> per anchor, so one anchor cannot use up the round.</li>
+      <li><strong>A deadline of 500 ms</strong> for forming in a round (<a href="#matchmaker">matchmaker</a>).</li>
+      <li><strong>No match above penalty 0</strong> is ever returned. The bounds can make the engine miss a match; they cannot make it break a rule.</li>
+    </ul>
+    <h3>Measured</h3>
+    <p>A prototype of this engine in Go, on one core, with tickets drawn around a skill rating of 1,500 and 15% of them parties:</p>
+    <div class="scroll"><table>
+      <tr><th>Waiting tickets, <code>siege</code>, example rule set</th><th>Time for the round</th><th>Players matched in that round</th></tr>
+      <tr><td>3,600</td><td>9.3 ms</td><td>91.3%</td></tr>
+      <tr><td>14,400</td><td>48 ms</td><td>96.5%</td></tr>
+      <tr><td>100,000</td><td>269 ms</td><td>99.4%</td></tr>
+    </table></div>
+    <p>The players not matched in a round are mostly those whose neighbours are too few for their current limits; they are first in line a second later. With arrivals at the evening-peak rate of the busiest pool (240 tickets a second), half of the tickets were matched within 1.6 s and 95% within 6.9 s. Those waits depend on the invented spread of attributes, so they show the shape and promise nothing.</p>
+  </div>
+</section>
+
+<section id="rules" class="k-match" data-toc="Rules" data-sub="1" data-nodes="match"
+  data-more2="the contract a kind of rule fulfils, what a rule is allowed to see, the five kinds, the check at the join, changing a rule set while tickets wait, and where the idea comes from"
+  data-more3="a rule set as stored, two kinds in Go, other games’ rule sets on the same engine, what the contract costs and what it cannot say">
+  <div class="sh"><h2>Inside the matchmaker: rules</h2></div>
+  <p class="lede">Rules are the part every game changes, so they are kept apart from the part no game changes. The matchmaker knows a ticket’s size and how long it has waited, and nothing else about its players. Everything a game means by a fair match is a rule.</p>
+  <p data-req="FR4">A rule answers one question about a finished match: how far is it from acceptable? The answer is a penalty, 0 when the match meets the rule. A rule never says how to build a match, so the tenth rule is as easy to add as the first. A mode’s rule set is a list of rules with their settings, and operators change it while the system runs. The example game’s rule set for <code>siege</code> has five rules of three kinds.</p>
+  <div class="scroll"><table>
+    <tr><th>Kind of rule</th><th>In the example game</th></tr>
+    <tr><td>Span</td><td>Combat ratings in the match differ by at most 2 levels</td></tr>
+    <tr><td>Span, widening</td><td>Skill ratings differ by at most 100 points, plus 10 for each second waited, up to 400</td></tr>
+    <tr><td>Mirror</td><td>For each class, the two teams’ counts differ by at most 1</td></tr>
+    <tr><td>Team average</td><td>The teams’ average skill ratings differ by at most 50 points</td></tr>
+    <tr><td>Team average</td><td>The teams’ average combat ratings differ by at most 0.5 level</td></tr>
+  </table></div>
+
+  <div data-l="2">
+    <h3>The contract</h3>
+    <p>A <strong>kind</strong> of rule is code in the rule library, a package built into both the matchmaker and the API service: the matchmaker judges matches with it, and the API uses it to check a join, to build a ticket’s summary and to check a new rule set. A <strong>rule</strong> is data: a kind, the attribute it reads and its settings, listed in a mode’s rule set. A kind fulfils a contract of three functions.</p>
+    <div class="scroll"><table>
+      <tr><th>Function</th><th>Given</th><th>Answers</th><th>Must hold</th></tr>
+      <tr><td><code>penalty</code></td><td>The totals of the whole match and of each team, the team size, the waiting time</td><td>A number: 0 when the match meets the rule, larger the further it is off</td><td>Required. The same input always gives the same answer</td></tr>
+      <tr><td><code>fits</code></td><td>The totals of the tickets selected so far, one more ticket, the waiting time</td><td>Yes or no</td><td>Optional; yes by default. “No” must mean that no match containing those tickets can meet the rule. It only saves work: <code>penalty</code> alone decides</td></tr>
+      <tr><td><code>check</code></td><td>The rule’s settings as an operator wrote them</td><td>Accepted, or what is wrong</td><td>Run when a new version of a mode is written</td></tr>
+    </table></div>
+    <p data-req="NFR2">The engine commits a match only when every rule’s <code>penalty</code> is 0, so a match that breaks a rule cannot be formed, whatever the search does. The waiting time handed to a rule is that of the match’s longest-waiting ticket. A limit written with a start, a step and a cap is read as the start plus the step for every second waited, up to the cap; that is how any rule of any kind loosens with waiting.</p>
+    <h3>What a rule is allowed to see</h3>
+    <p>A rule reads <strong>totals</strong> and nothing else: for each number attribute the lowest value, the highest and the sum; for each label attribute a count per value; the number of players, and how many of them came in a party. For a number that a rule reads once per ticket, a party counting as its highest value, the totals also keep the lowest and the highest of those per-ticket values. The engine keeps totals for each ticket, for the tickets selected so far and for each team. A rule cannot read another ticket, the store or a clock. Two things follow. Judging a swap means adjusting two teams’ totals, which costs the same for teams of 5 and teams of 15. And a rule can be tested on its own, with made-up totals.</p>
+    <h3>The five kinds in the library</h3>
+    <div class="scroll"><table>
+      <tr><th>Kind</th><th>Says</th><th>Settings</th><th>Has <code>fits</code></th></tr>
+      <tr><td><code>span</code></td><td>The values of a number attribute across the match differ by at most a limit</td><td>The attribute, the limit, and whether a party counts once with its highest value</td><td>Yes: the span of the selection plus the ticket</td></tr>
+      <tr><td><code>mirror</code></td><td>For every value of an attribute, the two teams’ counts differ by at most a limit</td><td>The attribute, the limit</td><td>No</td></tr>
+      <tr><td><code>cap</code></td><td>A team has at most so many players with one value of an attribute</td><td>The attribute, the value, the limit</td><td>Yes: the selection holds at most twice the limit</td></tr>
+      <tr><td><code>team_average</code></td><td>The teams’ averages of a number attribute differ by at most a limit</td><td>The attribute, the limit</td><td>No</td></tr>
+      <tr><td><code>party_balance</code></td><td>The teams’ counts of players who came in a party differ by at most a limit</td><td>The limit</td><td>No</td></tr>
+    </table></div>
+    <p>The example game uses three of them. The other two are there because other games need them, and they cost a game that does not list them nothing.</p>
+    <h3>The check at the join</h3>
+    <p>A ticket that breaks a rule all by itself can never be in a match. The API therefore asks every rule’s <code>fits</code> about the new ticket alone, with the waiting time set to the mode’s time limit so that every limit is at its widest. In the example game a party whose combat ratings are 3 levels apart is refused at once and told why, where it would otherwise wait 300 s for nothing.</p>
+    <h3>Changing a rule set while tickets wait</h3>
+    <p>A mode’s rule set is versioned: writing a mode adds a row and changes none. Before it is stored, the new version goes through each kind’s <code>check</code>, and a rule set that names an unknown kind or leaves out a setting is refused. Owners read the newest version at the start of every round, so the change takes effect within a second and no matchmaker node is restarted. Each match records the version it was formed under. A waiting ticket built under the older version has its summary rebuilt by the owner within the next few rounds. If the new rule set reads an attribute its players do not have, the ticket expires with the reason <code>rules_changed</code>, and its players may join again.</p>
+    <p>A new attribute needs no release at all: the profile service starts returning it and a rule set names it. A new kind of rule does need a release, in this order: the matchmaker nodes, then the API nodes, and only then a rule set that uses the kind. An API node that meets a rule set it cannot load refuses joins for that mode with “try again” and raises an alert. The new kind changes nothing in how tickets are stored, matched or assigned.</p>
+    <h3>Where the idea comes from</h3>
+    <p>The team behind World of Tanks Blitz, a mobile game with 7 players a side, describe arriving at the same contract. Their balancer once paired players up and then repaired the teams in passes, one pass per requirement. Each new pass had to avoid undoing the earlier ones, and they call that road a dead end. They replaced it with one evaluation function that adds a penalty for every requirement a candidate pair of teams breaks, so that a new requirement became one more term in the function.</p>
+    <p>Their search is different from the one in this guide. It is simulated annealing: start from two empty teams, make a random move (add, remove, replace or swap a player), keep the move or not by a probability that falls over time, and stop at penalty 0. This guide’s search starts from the longest-waiting ticket and takes the nearest tickets first, because that serves tickets oldest first and bounds the work per match; random moves give neither. Their search is the natural replacement for the search step when a rule set defeats the greedy one. They also note that a rule about who may meet at all is better placed where candidates are picked, which is what <code>fits</code> is for.</p>
+  </div>
+  <div data-l="3">
+    <h3>A rule set as stored</h3>
+<pre data-lang="json"><code>PUT /v1/modes/siege
+{
+  "enabled": true,
+  "team_size": 15,
+  "max_party_size": 5,
+  "sort_attribute": "skill",
+  "ticket_ttl_s": 300,
+  "reserve_deadline_s": 10,
+  "rules": [
+    { "kind": "span", "attribute": "combat_rating", "max": 2 },
+    { "kind": "span", "attribute": "skill", "per_ticket": "highest",
+      "max": { "start": 100, "step": 10, "cap": 400 } },
+    { "kind": "mirror", "attribute": "class", "max_diff": 1 },
+    { "kind": "team_average", "attribute": "skill", "max_diff": 50 },
+    { "kind": "team_average", "attribute": "combat_rating", "max_diff": 0.5 }
+  ]
+}
+
+201 Created
+{ "mode": "siege", "version": 4 }</code></pre>
+    <p>Each body field is the column of the same name in <code>modes</code>; <code>version</code> is the previous version plus one and <code>created_by</code> is the operator. Inside <code>rules</code>, every entry has a <code>kind</code> and that kind’s settings: <code>attribute</code>, a limit called <code>max</code> or <code>max_diff</code> (a number, or a start, step and cap), <code>value</code> for a cap, and <code>per_ticket</code> for a span in which a party counts once. <code>skirmish</code> has the same five rules with a team size of 5; <code>duel</code> has the first three and a team size of 1. After a match is formed, <code>matches.rule_values</code> holds what each rule measured on it, for example a skill span of 180.</p>
+    <h3>Two kinds in Go</h3>
+<pre data-lang="go"><code>// A rule judges; it never builds.
+type Rule interface {
+	// Fits reports whether a match containing the selection and t could still meet the rule.
+	Fits(sel, t *Totals, wait float64) bool
+	// Penalty is 0 when the match meets the rule, and grows with the distance.
+	Penalty(match, a, b *Totals, teamSize int, wait float64) float64
+}
+
+// Limit is a setting that may widen while the longest-waiting ticket waits.
+type Limit struct{ Start, Step, Cap float64 }
+
+func (l Limit) At(wait float64) float64 { return math.Min(l.Cap, l.Start+l.Step*wait) }
+
+// Span: the values of one number attribute across the match differ by at most Max.
+type Span struct {
+	Attribute string
+	Max       Limit
+}
+
+func (r Span) Fits(sel, t *Totals, wait float64) bool {
+	lo := math.Min(sel.Min[r.Attribute], t.Min[r.Attribute])
+	hi := math.Max(sel.Max[r.Attribute], t.Max[r.Attribute])
+	return hi-lo &lt;= r.Max.At(wait)
+}
+
+func (r Span) Penalty(m, a, b *Totals, teamSize int, wait float64) float64 {
+	return math.Max(0, m.Max[r.Attribute]-m.Min[r.Attribute]-r.Max.At(wait))
+}
+
+// Mirror: for every value of an attribute the two teams' counts differ by at most MaxDiff.
+type Mirror struct {
+	Attribute string
+	MaxDiff   int
+}
+
+func (r Mirror) Fits(sel, t *Totals, wait float64) bool { return true }
+
+func (r Mirror) Penalty(m, a, b *Totals, teamSize int, wait float64) float64 {
+	p := 0
+	for value := range m.Count[r.Attribute] {
+		d := a.Count[r.Attribute][value] - b.Count[r.Attribute][value]
+		if d &lt; 0 {
+			d = -d
+		}
+		if d &gt; r.MaxDiff {
+			p += d - r.MaxDiff
+		}
+	}
+	return float64(p)
+}</code></pre>
+    <p>The listing leaves out the setting that lets a party count once: with it, <code>Span</code> reads the lowest and the highest of the tickets’ highest values where it now reads the lowest and the highest of all players. A fixed limit such as “2 levels” is a <code>Limit</code> whose start and cap are equal.</p>
+    <h3>Other games’ rule sets on the same engine</h3>
+    <p>To test that the contract is not shaped around the example game, two published rule sets were written as rules and run on the same engine, without changing a line of it. One is the Random Battle of World of Tanks as its makers describe it, without its templates; the other is the Blitz balancer described above. One round over 14,400 waiting tickets, one core:</p>
+    <div class="scroll"><table>
+      <tr><th>Rule set</th><th>Rules</th><th>Time</th><th>Players matched in the round</th></tr>
+      <tr><td>The example game, <code>siege</code>, 15 a side</td><td>5</td><td>48 ms</td><td>96.5%</td></tr>
+      <tr><td>The example game, <code>skirmish</code>, 5 a side</td><td>5</td><td>44 ms</td><td>91.0%</td></tr>
+      <tr><td>The example game, <code>duel</code></td><td>3</td><td>6 ms</td><td>99.9%</td></tr>
+      <tr><td>Random Battles without templates: 15 a side, no skill input, levels within 2 and mirrored within 1, classes mirrored within 1, at most 3 and 5 of two classes a side, parties of up to 3 on one level, party players within 3</td><td>6</td><td>46 ms</td><td>99.6%</td></tr>
+      <tr><td>The same, with teams exactly equal at every level</td><td>6</td><td>378 ms</td><td>98.5%</td></tr>
+      <tr><td>The Blitz balancer: 7 a side, levels within 1, teams equal at every level, classes mirrored within 1, at most 3 of a class a side</td><td>7</td><td>41 ms</td><td>98.7%</td></tr>
+    </table></div>
+    <p>A game without skill input simply lists no rule that reads a skill attribute. The fifth row shows what a strict rule costs the greedy search: demanding exact equality where a difference of 1 was allowed takes 8 times as long.</p>
+    <h3>What the contract costs, and what it cannot say</h3>
+    <ul>
+      <li><strong>Cost.</strong> Calling rules through the contract takes about 5 times as long as the same limits written straight into the engine: 48 ms against 10 ms for 14,400 tickets. At this design’s sizes that is 50 ms of a second.</li>
+      <li><strong>A rule sees totals, not players.</strong> “These two players must not meet” or “not at the bottom of the list three matches running” needs a new total in the engine, or a new attribute from the profile service.</li>
+      <li><strong>The search is greedy.</strong> A rule set whose matches are rare among the nearest tickets is found slowly or missed. A rule that fixes the shape of a match before it is filled, such as a template of how many players stand at each level, would need a <code>fits</code> that knows the shape, or another search.</li>
+      <li><strong>Trying a rule set.</strong> Because a rule reads only totals, a rule set can be tried without a store or a network: generate tickets with the game’s mix of attributes, run rounds with arrivals, and read the time per round, the share matched and the waits. The figures in this guide were produced that way.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="assigner" class="k-assign" data-toc="Assigner" data-num="4" data-nodes="assign store"
+  data-more2="why the obvious orders fail, the loop an assigner runs, the claim, the deadline and the way back, and a sequence diagram of the one race"
+  data-more3="the claim, renew, ready and drop statements, the fleet’s interface, what happens when assigners or the fleet are down, and how many assigners a region needs">
+  <div class="sh"><h2><span class="num">4</span>Assigner</h2></div>
+  <p class="lede" data-req="FR6">The assigner gets every match a game server. Forming a match and reserving a server are two writes in two systems, so a crash can fall between them.</p>
+  <p>The match is committed first and the server is reserved second. A committed match without a server is visible in the store, so any assigner can pick it up: recovery after a crash is the same loop as normal work. The reservation carries the match’s id, so asking twice returns the same server. A deadline keeps players from waiting on a fleet that has no server to give: after 10 s the match is <code>dropped</code> and its tickets go back to <code>waiting</code>, first in line, with their waiting time intact.</p>
+  <figure><div class="scroll"><svg viewBox="0 0 600 150" style="min-width:480px;max-width:640px;margin:0 auto" role="img" aria-label="Match states: reserving to ready when a game server is reserved, or reserving to dropped when no server comes within 10 seconds.">
+    <g class="k-match"><rect class="box" x="30" y="53" width="130" height="44" rx="9"/><text class="t" x="95" y="75" text-anchor="middle" dominant-baseline="central">reserving</text></g>
+    <g class="k-assign"><rect class="box" x="400" y="10" width="130" height="44" rx="9"/><text class="t" x="465" y="32" text-anchor="middle" dominant-baseline="central">ready</text></g>
+    <g style="--k:var(--bad)"><rect class="box" x="400" y="96" width="130" height="44" rx="9"/><text class="t" x="465" y="118" text-anchor="middle" dominant-baseline="central">dropped</text></g>
+    <path class="wire" marker-end="url(#ah)" d="M160 66 399 36"/><text class="s" x="276" y="38" text-anchor="middle">a game server is reserved</text>
+    <path class="wire" marker-end="url(#ah)" d="M160 84 399 114"/><text class="s" x="276" y="120" text-anchor="middle">no server within 10 s</text>
+  </svg></div>
+  <figcaption>Both end states are final. <code>ready</code> moves the match’s tickets to <code>assigned</code>; <code>dropped</code> moves them back to <code>waiting</code>.</figcaption></figure>
+
+  <div data-l="2">
+    <h3>Why the obvious orders fail</h3>
+    <ul>
+      <li><strong>Reserve first, then commit.</strong> If the commit then fails, because a ticket was cancelled in between or the matchmaker crashed, a game server sits reserved for a match that does not exist. And a slow fleet would stall the owner’s round, which has a second to finish.</li>
+      <li><strong>Reserve inside the commit’s transaction.</strong> The transaction would hold its tickets locked for the length of a network call to another system.</li>
+    </ul>
+    <h3>The loop</h3>
+    <p>Four assigners run in each region. Every 200 ms each of them claims a batch of matches, and it works on all the matches it has claimed at the same time, each until it is ready or dropped. An assigner keeps nothing that the store does not have: if it dies, its claims run out and another assigner takes its matches.</p>
+    <ol>
+      <li><strong>Claim.</strong> Take up to 50 matches that are <code>reserving</code> and that nobody has claimed in the last 5 s, and mark them as claimed. Two assigners never take the same match in the same pass.</li>
+      <li><strong>Reserve.</strong> Ask the fleet for a game server for the match, in the pool’s region. The call names the match’s id, and the fleet answers a repeated call with the server it already gave. The call is given 2 s, less than the claim lasts.</li>
+      <li><strong>Record.</strong> Store the server’s address, move the match to <code>ready</code> and its tickets to <code>assigned</code>, in one transaction that requires the match to be still <code>reserving</code>.</li>
+      <li><strong>Or try again.</strong> If the fleet has no server or does not answer, wait (200 ms, doubling to 1.6 s), renew the claim for another 5 s and ask again while the deadline allows. The longest wait and a call together take 3.6 s, so a claim never runs out under an assigner that is alive.</li>
+      <li><strong>Or drop.</strong> Once a match’s deadline has passed, any assigner drops it, whoever holds the claim: the match moves to <code>dropped</code> and its tickets back to <code>waiting</code>, again only if the match is still <code>reserving</code>. A ticket whose player asked to leave in the meantime is cancelled instead.</li>
+    </ol>
+    <div class="brief"><b>Brief: idempotent.</b> A call is idempotent when making it twice has the same effect as making it once. “Reserve a server for match m_7” is idempotent if the fleet remembers which server it gave to m_7; “reserve a server” is not.</div>
+    <p data-req="FR6">The claim is only a courtesy between assigners, like the pool’s lease between owners: it stops two of them calling the fleet for the same match at the same moment. If an assigner dies with a claim, the claim runs out after 5 s and another one takes the match. What keeps the outcome single is the condition in the two final writes: a match can leave <code>reserving</code> only once.</p>
+    <h3>The deadline and the way back</h3>
+    <p>A match’s deadline is set when it is committed: 10 s later. Dropping a match is not a failure of the system; it is the planned answer to a fleet that is full. The tickets return to their pool with their original starting time, so the next round takes them before anyone who joined later, and their limits are as wide as their whole wait has earned. Players see “match found” turn back into “searching”, which is why the server’s address is sent only once the server exists.</p>
+    <p data-req="NFR3">A ticket whose 300 s run out while it sits in a match that is then dropped is expired by the next round. The drop comes within one pass of an assigner after the deadline, and the round within a second of the drop:</p>
+    <div class="formula">latest expiry after the 300 s: 10 s + 0.2 s + 1 s = 11.2 s</div>
+    <p>NFR3 rounds this up to 12 s.</p>
+    <h3>The one race</h3>
+    <p>A slow answer from the fleet can arrive after another assigner has dropped the match.</p>
+    <figure class="steps">
+      <div class="scroll"><svg viewBox="0 0 720 300" style="min-width:620px" role="img" aria-label="Sequence: assigner A claims match m_7 and asks the fleet for a server; the fleet is slow; the deadline passes and assigner B drops the match, sending its tickets back to waiting; the fleet then answers A with a server; A’s write to mark the match ready changes no row because the match is dropped; A frees the reservation.">
+        <g style="--k:var(--muted)"><rect class="box" x="20" y="10" width="120" height="34" rx="8"/><text class="t" x="80" y="27" text-anchor="middle" dominant-baseline="central">Fleet</text></g>
+        <g class="k-assign"><rect class="box" x="200" y="10" width="120" height="34" rx="8"/><text class="t" x="260" y="27" text-anchor="middle" dominant-baseline="central">Assigner A</text></g>
+        <g class="k-store"><rect class="box" x="400" y="10" width="120" height="34" rx="8"/><text class="t" x="460" y="27" text-anchor="middle" dominant-baseline="central">Ticket store</text></g>
+        <g class="k-assign"><rect class="box" x="580" y="10" width="120" height="34" rx="8"/><text class="t" x="640" y="27" text-anchor="middle" dominant-baseline="central">Assigner B</text></g>
+        <path d="M80 44V292M260 44V292M460 44V292M640 44V292" stroke="var(--line)" stroke-width="1.2" stroke-dasharray="4 4"/>
+        <g data-s="1"><path class="wire" marker-end="url(#ah)" d="M260 76H458"/><text class="s" x="360" y="68" text-anchor="middle">claims m_7 ✓</text></g>
+        <g data-s="2"><path class="wire" marker-end="url(#ah)" d="M260 108H82"/><text class="s" x="170" y="100" text-anchor="middle">a server for m_7?</text><rect x="66" y="116" width="28" height="74" rx="5" fill="color-mix(in srgb,var(--mark) 55%,var(--surface))" stroke="var(--amber)"/><text class="s" x="102" y="150">slow</text></g>
+        <g data-s="3"><path class="wire" marker-end="url(#ah)" d="M640 162H462"/><text class="s" x="550" y="140" text-anchor="middle">deadline passed:</text><text class="s" x="550" y="154" text-anchor="middle">drops m_7 ✓</text></g>
+        <g data-s="4"><path class="wire" marker-end="url(#ah)" d="M80 204H258"/><text class="s" x="170" y="196" text-anchor="middle">server s_9</text></g>
+        <g data-s="5"><path marker-end="url(#ahb)" d="M260 236H458" stroke="var(--bad)" stroke-width="1.3" fill="none"/><text class="s" x="360" y="228" text-anchor="middle" style="fill:var(--bad)">m_7 ready? no row changed</text></g>
+        <g data-s="6"><path class="wire" marker-end="url(#ah)" d="M260 270H82"/><text class="s" x="170" y="262" text-anchor="middle">free the server of m_7</text></g>
+      </svg></div>
+      <figcaption>Read top to bottom as time passing, or press Play to step through it. The match ends in exactly one state, <code>dropped</code>, its tickets are back in the pool, and the server that arrived too late is given back.</figcaption>
+      <ol class="stepnotes">
+        <li>Assigner A claims match m_7, which is reserving.</li>
+        <li>A asks the fleet for a game server for m_7. The fleet is slow to answer.</li>
+        <li>The match’s deadline passes while A waits. Assigner B drops it, as any assigner may once the deadline is past: the match was still reserving, so the write succeeds and its tickets are waiting again.</li>
+        <li>The fleet answers A at last, with server s_9.</li>
+        <li>A tries to mark m_7 ready. The write requires the match to be reserving; it is dropped, so no row changes.</li>
+        <li>A knows it lost and frees the reservation, so the server does not stand idle.</li>
+      </ol>
+    </figure>
+  </div>
+  <div data-l="3">
+    <h3>The statements</h3>
+<pre data-lang="sql"><code>UPDATE matches                                                -- claim
+SET claimed_by = ?, claimed_until = now() + interval '5 seconds',
+    reserve_attempts = reserve_attempts + 1, updated_at = now()
+WHERE id IN (SELECT id FROM matches
+             WHERE state = 'reserving' AND (claimed_until IS NULL OR claimed_until &lt; now())
+             ORDER BY created_at LIMIT 50
+             FOR UPDATE SKIP LOCKED)
+RETURNING id, region, mode, reserve_deadline;
+
+UPDATE matches                                                -- renew a claim before another try
+SET claimed_until = now() + interval '5 seconds', updated_at = now()
+WHERE id = ? AND claimed_by = ? AND state = 'reserving';
+
+BEGIN;                                                        -- ready
+UPDATE matches SET state = 'ready', server_address = ?, ready_at = now(), updated_at = now()
+WHERE id = ? AND state = 'reserving';
+UPDATE tickets SET state = 'assigned', assigned_at = now(), updated_at = now()
+WHERE match_id = ? AND state = 'matched';
+UPDATE ticket_players SET live = false
+WHERE ticket_id IN (SELECT ticket_id FROM match_tickets WHERE match_id = ?) AND live;
+COMMIT;
+
+BEGIN;                                                        -- drop, by any assigner once the deadline has passed
+UPDATE matches SET state = 'dropped', drop_reason = ?, dropped_at = now(), updated_at = now()
+WHERE id = ? AND state = 'reserving' AND reserve_deadline &lt; now();
+UPDATE tickets SET                                            -- each ticket decided in one statement
+  state        = CASE WHEN leave_requested_at IS NULL THEN 'waiting' ELSE 'cancelled' END,
+  requeues     = requeues + CASE WHEN leave_requested_at IS NULL THEN 1 ELSE 0 END,
+  end_reason   = CASE WHEN leave_requested_at IS NULL THEN NULL ELSE 'player' END,
+  cancelled_at = CASE WHEN leave_requested_at IS NULL THEN NULL ELSE now() END,
+  cancelled_by = leave_requested_by,
+  match_id = NULL, team = NULL, updated_at = now()
+WHERE match_id = ? AND state = 'matched'
+RETURNING id, state;
+UPDATE ticket_players SET live = false                        -- players of the tickets just cancelled
+WHERE ticket_id IN (?, ?) AND live;
+COMMIT;</code></pre>
+    <p><code>FOR UPDATE SKIP LOCKED</code> makes each assigner pass over rows another assigner is claiming at that instant, so they share the work without waiting on each other (PostgreSQL 9.5 and later, MySQL 8.0 and later). A match past its deadline is found through the same index as the claim, with <code>reserve_deadline &lt; now()</code> in place of the claim’s condition. In “ready” and in “drop”, the first statement decides: if it changes no row, the assigner rolls back and does nothing more to the store. After a lost “ready” it frees the reservation. The drop decides each ticket in a single statement: back to <code>waiting</code>, or <code>cancelled</code> if its player asked to leave. A leave that is being recorded at that very moment either is seen by the drop or finds the ticket no longer <code>matched</code>, and then the API repeats the cancel on the waiting ticket. A dropped match keeps its rows in <code>match_tickets</code>, so the history shows which tickets it held. A failed call to the fleet is written to <code>last_error</code>.</p>
+    <h3>The fleet’s interface</h3>
+    <ul>
+      <li><code>PUT /reservations/{match_id}</code> with the region, the mode and the two teams’ player ids returns a game server’s address. Repeating it for the same match id returns the same server. It answers <code>503</code> when no server is free.</li>
+      <li><code>DELETE /reservations/{match_id}</code> frees the server and can be repeated.</li>
+      <li>The fleet frees by itself a reserved server that no player has connected to after 60 s. This is a property the design asks of the fleet.</li>
+    </ul>
+    <p>Fleet products provide the reservation itself, under their own names: in Agones a <code>GameServerAllocation</code> moves a ready <code>GameServer</code> to allocated and returns its address and ports; Amazon GameLift places a game session. The three properties above (the same server for the same match id, a free call that can be repeated, release after 60 s without players) are not all built into them. They come from a thin adapter in front of the product. For Agones, for example, the adapter labels the game server with the match id when it allocates and looks for that label before it allocates again, and the game server process shuts itself down when nobody connects.</p>
+    <h3>When things are down</h3>
+    <ul>
+      <li><strong>The fleet is down or full.</strong> Matches are retried until their deadlines and then dropped. Tickets go round (matched, dropped, matched again) and keep their waiting time; if the fleet stays down they expire at 300 s with a definite answer. So that this does not churn the whole pool, an owner stops forming for a pool while more than 2,000 of its matches are <code>reserving</code>.</li>
+      <li><strong>An assigner dies after a drop, before freeing the server.</strong> The fleet’s own 60 s rule frees it. One server stands idle for up to a minute.</li>
+      <li><strong>Every assigner is down.</strong> Tickets stay <code>matched</code>; no player is told anything false. The first assigner back drops every match past its deadline and the tickets wait again with their waiting time. The signal to alert on is the age of the oldest <code>reserving</code> match.</li>
+    </ul>
+    <h3>Numbers</h3>
+    <div class="formula">reservations in the busiest region: 167 × 30% ≈ 50 per second<br>at an event start: 50 × 6 = 300 per second<br>one assigner: 50 ÷ 0.2 s = 250 matches/s<br>four assigners: 4 × 250 = 1,000 matches/s<br>matches of one event start: 24,000 ÷ 8 = 3,000 matches<br>reserving all of them: 3,000 ÷ 1,000 = 3 s</div>
+    <p>The 24,000 are the tickets the busiest region receives in the 10 s of an event start. Four assigners claim 1,000 matches a second, over three times the 300 that are formed, so the limit is the fleet, which the design asks for 1,000 reservations a second in a region. Even if every match of the burst waited for its server, they would all be served 3 s later, well inside the 60 s of NFR5. The cap of 2,000 <code>reserving</code> matches per pool is two seconds of that rate. Each match costs the store three commits when the first reservation succeeds (its own, the claim and the result), plus one renewal for every retry. The 1.375 commits per ticket under <a href="#estimates">capacity estimates</a> assume no retries. All assigners of a region together use 16 connections.</p>
+  </div>
+</section>
+
+<section id="correctness" class="k-store" data-toc="Correctness" data-group="Cross-cutting concerns" data-nodes="store match assign"
+  data-more2="the four races and their guards in one table, a crash between two writes, a join that is sent twice, and what the system does not promise"
+  data-more3="the rarer paths: a server reserved for nobody, a ticket whose player vanished, joining again, a ticket that outlives its rule set, a mode switched off, and a stale owner’s expiry">
+  <div class="sh"><h2>Correctness: one ticket, one match</h2></div>
+  <p class="lede" data-req="NFR1">The system promises that a ticket is never in two matches at once and that a player is never on two live tickets, whatever crashes and whatever races. Neither promise rests on a component behaving well. Both rest on writes that carry their own condition.</p>
+  <p>Every race in the design has the same shape. Two writers want the same ticket: two owners of one pool, a match and a player who leaves, a match and the time limit. Each write says “only if the ticket is still waiting”. The store applies them one after the other, and the second finds nothing to change. A match takes all of its tickets or none: if one is gone, the whole match is undone and the others stay waiting.</p>
+  <div class="brief"><b>Brief: guarded write.</b> A write that names the state it expects to find, in the same statement that changes it. The store reports how many rows it changed, so a writer that changed fewer than it asked for knows it lost and stops.</div>
+
+  <div data-l="2">
+    <h3>The four races</h3>
+    <div class="scroll"><table>
+      <tr><th>Who races</th><th>The guard, in both writes</th><th>If the other was first</th><th>End state</th></tr>
+      <tr><td>Two owners of one pool, each with a match that holds the same ticket</td><td>Every ticket of the match is still <code>waiting</code></td><td>The later match changes fewer tickets than it holds and is rolled back whole</td><td>The ticket is in one match; the loser’s other tickets are <code>waiting</code></td></tr>
+      <tr><td>A match commit and a player who leaves</td><td>The ticket is still <code>waiting</code></td><td>Cancel first: the match is rolled back. Commit first: the cancel changes no row, is answered with the match and is kept on the ticket</td><td><code>cancelled</code> or <code>matched</code>, never both. If that match is later dropped, the ticket is cancelled and not returned to the pool</td></tr>
+      <tr><td>A match commit and the time limit</td><td>The ticket is still <code>waiting</code></td><td>Whichever comes second changes no row</td><td><code>matched</code> or <code>expired</code>, never both</td></tr>
+      <tr><td>An assigner’s “ready” and another assigner’s “drop”</td><td>The match is still <code>reserving</code></td><td>A late “ready” changes no row and frees its server. A late “drop” changes no row and does nothing</td><td><code>ready</code> or <code>dropped</code>, never both</td></tr>
+    </table></div>
+    <p>The first three are one guard on tickets, and the fourth is the same idea on a match. The <a href="#matchmaker">matchmaker</a> and the <a href="#assigner">assigner</a> each show their race step by step.</p>
+    <h3>A crash between two writes</h3>
+    <p>The design has two places where one job spans two writes. Between the match commit and the reservation, the stored match is in the state <code>reserving</code>, which is exactly what assigners look for, so whoever crashed, some assigner continues. Between the reservation and its record, the next assigner repeats the reservation with the same match id and receives the same server. In both cases the end state is <code>ready</code>, or <code>dropped</code> at the deadline; nothing is left half done, and the only thing repeated is a call that is safe to repeat.</p>
+    <h3>A join that is sent twice</h3>
+    <p data-req="NFR1">An API node can crash after the join committed and before it answered. The client cannot tell whether its ticket exists, so it sends the join again, with the same join key. The store refuses a second ticket with that creator and key, and the API answers with the first one in whatever state it has reached by then: still waiting, or already holding a game server’s address. One ticket exists and its waiting time started with the first attempt. A client that has lost its key as well asks for its most recent ticket before it joins anew.</p>
+    <h3>What the system does not promise</h3>
+    <ul>
+      <li><strong>That the first match found is played.</strong> A ticket can be in a match that is dropped and later in another. It is never in two at once, and at most one of its matches ever gets a game server.</li>
+      <li><strong>That every player shows up.</strong> A player whose client crashed stays on the ticket until it is matched or expires. What a match does with an absent player is the game’s business.</li>
+      <li><strong>That a player in a match cannot join again.</strong> A ticket stops being live when it gets its game server, so its players can create a new ticket while that match is played. Keeping a player out of two matches at once is the game’s business too.</li>
+      <li><strong>The best possible match.</strong> Every match meets every rule. Among the matches that do, the search takes the first it finds.</li>
+    </ul>
+  </div>
+  <div data-l="3">
+    <h3>The rarer paths</h3>
+    <ul>
+      <li><strong>A server reserved for nobody.</strong> An assigner that loses the race in the table frees its reservation. If it dies before it can, the fleet frees a server nobody connected to after 60 s. Loss: one server idle for up to a minute.</li>
+      <li><strong>A ticket whose player vanished.</strong> Nothing cancels it, for the reason given under the <a href="#api">API service</a>. It is matched like any other, or expires at 300 s. Loss: possibly a match with an absent player.</li>
+      <li><strong>Joining again after the end.</strong> When a ticket is <code>cancelled</code> or <code>expired</code>, its players are no longer live, so their next join creates a new ticket with a new id and a new starting time. Waiting time is not carried over, by design: the old ticket had its answer.</li>
+      <li><strong>A ticket that outlives its rule set.</strong> A ticket built under version 3 is still waiting when version 4 arrives. The owner rebuilds its summary under a guard (still <code>waiting</code>, still version 3), and a match commit requires each ticket to be still <code>waiting</code> at the version the owner read, so a rebuild and a match commit cannot both win. If version 4 reads an attribute the ticket’s players do not have, the ticket expires with the reason <code>rules_changed</code>, and the player may join again.</li>
+      <li><strong>A mode switched off.</strong> Joins for it are refused, and the pool’s owner expires its waiting tickets with the reason <code>mode_disabled</code>, through the same guarded write as the time limit.</li>
+      <li><strong>A stale owner’s expiry.</strong> An owner that lost its lease may still run the expiry statement once. It changes only tickets that are <code>waiting</code> and truly past their limit by the store’s clock, so the worst it can do is what the new owner would have done.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="load" class="k-match" data-toc="Behaviour under load" data-nodes="api store match"
+  data-more2="why the store is not the limit, the rules that decide who waits in a burst, what a thin pool can and cannot be given, and what to measure"
+  data-more3="the store’s main machine lost at the evening peak, walked through with numbers, and the measured throughput">
+  <div class="sh"><h2>Behaviour under load</h2></div>
+  <p class="lede">A matchmaker has two bad moments, and they are opposites. At an event start a tenth of the players online join within 10 seconds: 8,000 tickets per second, 6 times the evening peak. At the quietest hour the thinnest pool has too few players to fill a match at all.</p>
+  <p data-req="NFR5 NFR3">The burst is the easier one. A join is one small commit, and the store commits thousands of them a second because commits that wait at the same moment are written together. The owner of a flooded pool forms matches oldest first and stops at a deadline inside each second, so a backlog delays the newest tickets and nothing else. The thin pool has no machinery to save it. There, limits that widen with waiting find a looser match, and a ticket that still cannot be matched gets a definite answer, <code>expired</code>, after 300 s.</p>
+
+  <div data-l="2">
+    <h3>Why the store is not the limit</h3>
+    <p>Every commit waits for two machines to write it to disk, which takes about 10 ms. It would be natural to conclude that one connection’s 100 commits a second is all there is. It is not, because a database writes its log once for all the commits that are waiting at that moment.</p>
+    <div class="brief"><b>Brief: group commit.</b> A database makes a commit durable by writing its log to disk. When several transactions commit at the same moment, one write to disk covers all of them. So the time for one commit stays the same as more connections commit, and the number of commits per second grows with the number of connections.</div>
+    <p data-req="NFR5">The busiest region receives 2,400 joins a second at an event start. At 10 ms each, that keeps 24 connections busy; the API has 128. Measured on the prototype described under <a href="#estimates">capacity estimates</a>, 128 connections carried 12,333 joins a second, and joins held at 2,400 a second were answered within 27.6 ms for 99% of them, against the 200 ms that NFR5 allows.</p>
+    <p>A join also waits for the profile service, which the design requires to answer 10,000 lookups a second, 99% of them within 50 ms. Added to the 27.6 ms of the commit, that is about 78 ms for 99% of joins. A lookup that takes longer than 100 ms ends the join with “try again”, and such joins count against NFR5: the matchmaker cannot accept players it knows nothing about.</p>
+    <h3>Who waits in a burst</h3>
+    <ul>
+      <li><strong>Oldest first.</strong> Every match starts from the longest-waiting ticket, so a burst cannot push earlier tickets back.</li>
+      <li><strong>A deadline inside the round.</strong> An owner stops forming at 500 ms and commits what it has. The worst round, with 18,000 tickets waiting, takes 638 ms, so the next round starts on time.</li>
+      <li><strong>Commits side by side.</strong> An owner commits a round’s matches on 16 connections: 1,600 a second where one connection manages 100.</li>
+      <li><strong>A cap on matches without a server.</strong> A burst of matches is also a burst of 300 reservations a second in the busiest region. While more than 2,000 of a pool’s matches are still <code>reserving</code>, its owner forms no more, so a slow fleet shows up as waiting, not as matches dropped wholesale.</li>
+      <li><strong>Clients that spread out.</strong> A client that is told to try again waits a random time before it does, so a region that comes back is not hit by everyone in the same second.</li>
+    </ul>
+    <h3>What a thin pool can be given</h3>
+    <p>In the emptiest corner the 30 players of a <code>siege</code> match take 60 s to arrive, and no component can make players exist. What the design can do is not waste them: one pool per mode and region, never divided further; limits that widen, so that the players who are there become a match sooner; and an honest end at 300 s. What operators can do is loosen a region’s rule set, or switch a mode off in a region at its quiet hours so that its players gather in the modes that remain. Both are a mode write, effective within a second.</p>
+    <h3>What to measure</h3>
+    <ul>
+      <li><strong>The wait until a game server</strong>, per pool: <code>assigned_at</code> minus <code>created_at</code>, at the median and at 95%. These are the two numbers of NFR3. <code>matched_at</code> minus <code>created_at</code> shows how much of that wait is forming and how much is the fleet.</li>
+      <li><strong>The age of the oldest waiting ticket</strong>, per pool: the smallest <code>created_at</code> among <code>waiting</code> tickets. It rises before the percentiles do.</li>
+      <li><strong>The share of tickets that expire</strong>, per pool and hour, from <code>end_reason</code>. A rising share in one pool means its rules are too strict for its population.</li>
+      <li><strong>The age of the oldest <code>reserving</code> match.</strong> Over 10 s means assigners are not keeping up or are down.</li>
+      <li><strong>Matches dropped</strong>, by <code>drop_reason</code>, and tickets with <code>requeues</code> above 0: the fleet’s health as players feel it.</li>
+      <li><strong>Pools with tickets waiting and no match formed for 10 s</strong>: an owner that is stuck, or a rule set no ticket can meet.</li>
+    </ul>
+  </div>
+  <div data-l="3">
+    <h3>The store’s main machine is lost at the evening peak</h3>
+    <p>The primary of the busiest region’s store fails at 20:00:00. The region is receiving 400 joins a second.</p>
+    <ol>
+      <li><strong>20:00:00.</strong> Commits stop. Joins are answered with “try again”. Owners’ rounds fail at their first statement, so they form nothing; renewals fail too, and the leases will run out, which does not matter because nobody can take them either. Assigners cannot claim. Streams stay open and report nothing new.</li>
+      <li><strong>Up to 20:01:00.</strong> The standby that has received more of the primary’s log is promoted. This design allows 60 s for it; how long it really takes depends on the failover manager and its settings.</li>
+      <li><strong>The store is back.</strong> Every ticket that was acknowledged is there, with its waiting time. The other standby follows the new primary, so every commit is on two machines again from the first one on. A node takes each pool’s lease in its next check. Matches that were being committed at the failure either committed whole or not at all; the ones that did not are formed again in the first round. Assigners pick up every <code>reserving</code> match; those past their deadline are dropped and their tickets are first in line.</li>
+      <li><strong>The held-back joins return.</strong></li>
+    </ol>
+    <div class="formula">joins held back: 60 s × 400 = 24,000 joins<br>returning over 10 s: 24,000 ÷ 10 s = 2,400 joins/s</div>
+    <p>Clients spread their retries over 10 s, so the region sees 2,400 joins a second on top of its normal 400: 2,800 a second, a little more than the event-start rate it is sized for and well inside the 12,800 its connections can carry. The first rounds after the failover read a larger pool, at most the 24,000 held-back tickets shared among three pools, and work through it oldest first.</p>
+    <p>Players who were waiting through the outage waited up to 60 s longer; that time counts towards their limits, so their first round after the failover has the widest candidates. Nothing was lost and nothing was matched twice.</p>
+    <h3>Measured throughput</h3>
+    <div class="scroll"><table>
+      <tr><th>Test, on the prototype’s store</th><th>Result</th></tr>
+      <tr><td>Joins as fast as they go, on 64, 128 and 256 connections</td><td>6,451, 12,333 and 24,091 a second</td></tr>
+      <tr><td>The whole life of a ticket (join, match, claim, result), on 64, 128 and 256 connections</td><td>4,512, 8,168 and 15,280 tickets a second: 1.9, 3.4 and 6.4 times the event start of the busiest region</td></tr>
+      <tr><td>Joins held at 2,400 a second on 128 connections</td><td>Median 9.5 ms; 99% within 27.6 ms</td></tr>
+      <tr><td>The same on 32 connections</td><td>99% within 214 ms: too few connections make a queue, not a slow store</td></tr>
+      <tr><td>Joins on 64 connections when the commit does not wait for the second machine</td><td>12,753 a second at 5 ms each</td></tr>
+    </table></div>
+    <p>Throughput doubles with the connections, as group commit predicts, while each commit stays near 10 ms. The last row shows what the second machine costs: about half of each commit’s time, and none of the guarantees could be kept without it. The test ran one standby; the design’s second one adds nothing to the wait, because a commit needs only the faster of the two. The setup is described under <a href="#estimates">capacity estimates</a>; a production store differs in both directions, with faster disks and a longer way to the standby.</p>
+  </div>
+</section>
+
+<section id="simple-design" class="k-store" data-toc="Design at lower scale" data-group="Wrap-up" data-nodes="store match"
+  data-more2="what is dropped and what replaces it, the working behind the 100,000, and when the simple design stops being enough">
+  <div class="sh"><h2>Design at lower scale: one process per region</h2></div>
+  <p class="lede">Below about 100,000 players online in a region, you can drop the lease per pool, the separate assigners and the open streams. One matchmaker process per region forms the matches and reserves the servers, with one spare behind a single lease, and clients read their ticket once a second. The 100,000 is the size at which one database connection, committing 100 matches a second, still covers an event start.</p>
+  <p>What stays is everything the guarantees rest on: the store with its standbys, the condition in every write, and the rules.</p>
+  <div data-l="2">
+    <div class="scroll"><table>
+      <tr><th>The full design</th><th>At lower scale</th></tr>
+      <tr><td>One lease per pool; three or more matchmaker nodes</td><td>One lease for the whole region; one process and one spare</td></tr>
+      <tr><td>A round’s matches committed side by side on 16 connections</td><td>One at a time on one connection: 100 a second</td></tr>
+      <tr><td>Separate assigners that look for matches to reserve</td><td>A second loop in the same process. It still starts from the matches the store shows as <code>reserving</code>, so a restart needs no special recovery</td></tr>
+      <tr><td>One open stream per waiting player</td><td>The client reads its ticket once a second</td></tr>
+    </table></div>
+    <div class="formula">one connection: 1 ÷ 0.010 s = 100 matches/s<br>tickets it carries at an event start: 100 × 8 = 800 tickets/s<br>the evening peak that goes with it: 800 ÷ 6 ≈ 133 tickets/s<br>players online: 133 × 1.25 × 600 s ≈ 100,000 players</div>
+    <p>The working runs the estimates backwards: 8 tickets to a match, an event start of 6 times the evening peak, 1.25 players to a ticket and one join every 600 s. The simple design stops being enough when an event start needs more than 100 match commits a second, or when pausing all of a region’s pools for up to 8 s at a takeover is too much. The step up is small, because nothing stored changes: more leases, more connections, and the assigner loop moved into its own process.</p>
+  </div>
+</section>
+
+<section id="reading" data-toc="References" data-nodes="" data-ref="1">
+  <div class="sh"><h2>References</h2></div>
+  <ul>
+    <li>Open Match, <a href="https://open-match.dev/site/docs/overview/" target="_blank" rel="noopener">overview</a>: an open-source matchmaking framework, and a second design to compare this one with.</li>
+    <li>Amazon GameLift, <a href="https://docs.aws.amazon.com/gamelift/latest/flexmatchguide/match-rulesets.html" target="_blank" rel="noopener">FlexMatch rule sets</a>: rules as data, with expansions that loosen a rule as players wait.</li>
+    <li>“bak”, <a href="https://habr.com/ru/companies/exWargaming/articles/458866/" target="_blank" rel="noopener">How the team balancer in World of Tanks Blitz works</a> (in Russian): requirements as penalties in one evaluation function, searched by simulated annealing.</li>
+    <li>Wargaming, <a href="https://worldoftanks.eu/en/news/general-news/matchmaking-918/" target="_blank" rel="noopener">The State of Matchmaking</a>: a real rule set, with its templates, class limits and fall-backs.</li>
+    <li>Agones, <a href="https://agones.dev/site/docs/reference/gameserverallocation/" target="_blank" rel="noopener">GameServerAllocation</a>: what reserving a game server from a fleet looks like.</li>
+    <li>Herbrich, Minka and Graepel, <a href="https://www.microsoft.com/en-us/research/publication/trueskilltm-a-bayesian-skill-rating-system/" target="_blank" rel="noopener">TrueSkill: A Bayesian Skill Rating System</a>: where a skill rating comes from.</li>
+    <li>PostgreSQL documentation, <a href="https://www.postgresql.org/docs/current/warm-standby.html#SYNCHRONOUS-REPLICATION" target="_blank" rel="noopener">synchronous replication</a> and <a href="https://www.postgresql.org/docs/current/indexes-partial.html" target="_blank" rel="noopener">partial indexes</a>: the two features the ticket store leans on.</li>
+    <li>Martin Kleppmann, <a href="https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html" target="_blank" rel="noopener">How to do distributed locking</a>: why a lease alone guarantees nothing, and why the guard has to be in the write.</li>
+  </ul>
+  <h3>How to cite this page</h3>
+  <p class="cite">“Building a distributed matchmaker.” System design walkthrough, November 2026. <span id="citeurl"><a href="https://dhorbach.github.io/system-design/distributed-matchmaker.html" target="_blank" rel="noopener">https://dhorbach.github.io/system-design/distributed-matchmaker.html</a></span></p>
+</section>
+
+<dl id="glossary" hidden>
+  <dt data-match="synchronous standby|\bstandbys?\b">Synchronous standby</dt><dd>A database machine that receives every change as it happens; a commit is acknowledged only once a standby has it on disk too.</dd>
+  <dt data-match="\bleases?\b">Lease</dt><dd>A lock with an expiry time: the holder must renew it, and if the holder dies it runs out by itself.</dd>
+  <dt data-match="guarded writes?">Guarded write</dt><dd>A write that names the state it expects to find, in the same statement that changes it.</dd>
+  <dt data-match="fencing( tokens?)?">Fencing token</dt><dd>A number that grows each time ownership changes; the storage rejects writes that carry an older one.</dd>
+  <dt data-match="group commit">Group commit</dt><dd>One write to disk that makes several transactions durable at once.</dd>
+  <dt data-match="partial index(es)?">Partial index</dt><dd>An index that covers only the rows matching a condition.</dd>
+  <dt data-match="\bidempotent\b">Idempotent</dt><dd>Having the same effect when done twice as when done once.</dd>
+  <dt data-match="simulated annealing">Simulated annealing</dt><dd>A search that makes random changes and accepts worse ones less and less often as it goes on.</dd>
+  <dt data-match="\bgreedy\b">Greedy search</dt><dd>A search that always takes the best next step and does not go back on it.</dd>
+  <dt data-match="\bbackoff\b">Backoff</dt><dd>Waiting longer after each failed try.</dd>
+  <dt data-match="\bjitter\b">Jitter</dt><dd>A random part added to a wait, so that many clients do not retry at the same moment.</dd>
+  <dt data-match="\bfailover\b">Failover</dt><dd>Replacing a failed database machine by its standby.</dd>
+  <dt data-match="server-sent events">Server-sent events</dt><dd>A long-lived HTTP response over which the sender pushes messages as they happen.</dd>
+  <dt data-match="SKIP LOCKED" data-case data-code>SKIP LOCKED</dt><dd>An SQL clause that passes over rows another transaction has locked.</dd>
+  <dt data-match="READ COMMITTED" data-case data-code>READ COMMITTED</dt><dd>The isolation level in which each statement sees the rows committed before it began.</dd>
+</dl>
+
+<script>
+/* the widening limit: which waiting tickets fit around the oldest one as it waits */
+document.addEventListener('guide:ready',({detail:{$}})=>{
+  const pool=$('#pool'), cap=$('#poolcap'), inp=$('#waited'), out=$('#waitedv');
+  if(!pool||!inp) return;
+  const LO=1900, HI=2600, ANCHOR=2350, NEED=10;
+  const S=[1910,1925,1940,1960,1975,1990,2000,2015,2030,2045,2060,2070,2085,2100,2110,2125,2140,2155,
+           2180,2210,2260,2290,2320,2340,2350,2365,2390,2420,2450,2500,2540];
+  const at=s=>((s-LO)/(HI-LO)*100)+'%';
+  const dots=S.map(s=>{ const i=document.createElement('i'); i.style.left=at(s); pool.appendChild(i); return i; });
+  const lim=document.createElement('span'); lim.className='lim'; pool.appendChild(lim);
+  const order=S.map((s,i)=>i).filter(i=>S[i]!==ANCHOR).sort((a,b)=>Math.abs(S[a]-ANCHOR)-Math.abs(S[b]-ANCHOR));
+  function draw(){
+    const waited=+inp.value, limit=Math.min(400,100+10*waited);
+    let lo=ANCHOR, hi=ANCHOR; const sel=new Set([S.indexOf(ANCHOR)]);
+    for(const i of order){
+      if(sel.size===NEED) break;
+      const l=Math.min(lo,S[i]), h=Math.max(hi,S[i]);
+      if(h-l<=limit){ lo=l; hi=h; sel.add(i); }
+    }
+    dots.forEach((d,i)=>{ d.className=S[i]===ANCHOR?'an':sel.has(i)?'in':''; });
+    lim.style.left=at(lo); lim.style.width=((hi-lo)/(HI-LO)*100)+'%';
+    out.textContent=waited+' s';
+    cap.textContent=sel.size===NEED
+      ? 'After '+waited+' s the limit is '+limit+' points. Ten players fit inside it, '+(hi-lo)+' points apart, and the match forms.'
+      : 'After '+waited+' s the limit is '+limit+' points. Only '+sel.size+' of the 10 players a skirmish match needs fit inside it, so the oldest ticket keeps waiting and the limit keeps growing.';
+  }
+  inp.addEventListener('input',draw); draw();
+});
+</script>
+</body>
