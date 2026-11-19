@@ -34,6 +34,8 @@ Files in this skill:
 - `scripts/usl.py`: fits the scalability law to measured points and extrapolates with
   its error range. `scripts/queueing.py`: Little's law and the M/M/c queue.
 - `scripts/report.py`: fills the report page from the verdicts and your notes.
+- [Run analytics](reference/analytics.md): raw capture, monitoring CPU placement,
+  matchmaking event fields, Parquet archives and the offline dashboard.
 - `templates/`: `plan.md`, `claims.json`, `compose.yaml`, `bench.env`,
   `toxiproxy.json`, `run.sh` (the bench's verbs and the calibration scenario),
   `k6/load.js` (open-loop load), `sink/` (the stand-in for outside dependencies, with
@@ -48,12 +50,21 @@ board" and "Running a stage", and apply here unchanged.
 | Path | Holds | In git |
 |---|---|---|
 | `bench/<slug>/` | `plan.md`, `claims.json`, the prototype's source, `compose.yaml`, `bench.env`, `run.sh`, seed scripts, `scale.py` | yes |
-| `bench/<slug>/results/<scenario>/<run>/` | `metrics.json` and the files it was built from | yes, except `samples.jsonl` |
+| `bench/<slug>/results/<scenario>/<run>/` | `metrics.json`, source summaries and raw observations | yes, except `samples.jsonl` and `raw/` |
+| `bench/<slug>/analytics/`, `drafts/<slug>/bench-analytics.html` | Offline Parquet archive and dashboard | no |
 | `bench/<slug>/verdicts.json`, `notes.json` | The judged results and what you wrote about them | yes |
 | `drafts/<slug>/bench-board.html`, `bench-board.url` | The bench board and its artifact URL | no |
 | `drafts/<slug>/bench-report.html`, `bench-report.url` | The report and its artifact URL | no |
 
 `<slug>` is the page's file name without `.html`.
+
+Keep all design-specific rerun inputs in `bench/<slug>/`, including workload
+and observer source, seed values, dependency versions and commands to rebuild
+the report. Check that Git includes these inputs and commit them when the user
+has authorized it. Each run records the revision and file hashes in
+`results/<scenario>/<run>/source.json`; keep that manifest with its summary.
+If sources were dirty, match the recorded hashes against the committed files
+before treating that commit as the source of the run.
 
 ## Stages
 
@@ -154,6 +165,9 @@ python3 ../../.claude/skills/design-bench/scripts/verdict.py judge claims.json r
 ./run.sh smoke
 ```
 
+Reserve the monitoring CPU set and qualify raw capture against capture-off at
+the planned maximum before using it for results. Follow [run analytics](reference/analytics.md).
+
 Every calibration line must read "Holds" (set K4's target to a tenth of the tightest
 latency target; add a disk check per store). Calibration starts the default Compose
 services after testing the harness in isolation. Configure measured services in
@@ -187,6 +201,11 @@ settings. If a check fails, fix the bench before judging measured claims.
    detected. An undetected control means the check is blind; fix the check.
 
 ### 4. `results`
+
+Generate the local analytics dashboard from the archived runs as described in
+[run analytics](reference/analytics.md). Link it alongside the verdict report
+when returning the results. Record unavailable or incomplete capture in the
+results log.
 
 1. Write `bench/<slug>/notes.json` (shape in `scripts/report.py`): a two-sentence
    lead (what held, what gave way first), one finding per contradiction with its

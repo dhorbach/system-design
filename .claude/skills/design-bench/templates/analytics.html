@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bench analytics</title>
+<style>
+:root{color-scheme:light dark;--ink:#172b39;--paper:#f4f7f8;--surface:#fff;--muted:#506978;--line:#dbe5e9;--blue:#00768b;--purple:#7157ae;--orange:#a65217;--red:#a83832}
+@media(prefers-color-scheme:dark){:root{--ink:#e6eff2;--paper:#101b22;--surface:#182833;--muted:#b0c1ca;--line:#38505f;--blue:#55c5d5;--purple:#c7aaff;--orange:#f4a269;--red:#ffaaa3}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 system-ui,sans-serif}
+main{max-width:1170px;margin:auto;padding:32px 20px 60px}
+h1{font-size:clamp(2rem,5vw,3.25rem);line-height:1.12;margin:0 0 10px;letter-spacing:-.04em}
+h2{font-size:1.1rem;margin:0 0 10px}
+p{margin:0 0 12px;color:var(--muted)}
+.row,.cards,.charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:16px 0}
+.row{grid-template-columns:repeat(5,minmax(0,1fr));align-items:end}
+.cards{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+.panel,.stat{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:15px;min-width:0}
+label{display:grid;gap:4px;font-weight:650}
+select{width:100%;border:1px solid var(--line);border-radius:6px;padding:8px;background:var(--surface);color:var(--ink);font:inherit}
+.stat span{display:block;color:var(--muted)}
+.stat strong{font-size:1.6rem;font-variant-numeric:tabular-nums}
+.warning{color:var(--red);border-inline-start:3px solid currentColor;padding-inline-start:10px}
+.scroll{overflow:auto}
+table{width:100%;border-collapse:collapse;text-align:left}
+th,td{padding:7px 9px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+td:last-child{white-space:nowrap}
+svg{display:block;width:100%;height:auto;color:var(--muted)}
+svg text{fill:currentColor;font:10px system-ui,sans-serif}
+.legend{display:flex;flex-wrap:wrap;gap:12px;color:var(--muted);font-size:.85rem}
+.legend span::before{content:"";display:inline-block;width:10px;height:3px;background:var(--series);margin-right:5px;vertical-align:middle}
+@media(max-width:720px){.row{grid-template-columns:repeat(2,minmax(0,1fr))}.charts{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<h1>Bench analytics</h1>
+<p>Explore the archived observations by run and workload. Latencies use the individual samples in each displayed group.</p>
+<div class="row">
+<label>Scenario <select id="scenario"></select></label>
+<label>Run <select id="run"></select></label>
+<label>Window <select id="phase"></select></label>
+<label>Region <select id="region"></select></label>
+<label>Mode <select id="mode"></select></label>
+</div>
+<div id="evidence" aria-live="polite"></div>
+<div class="cards" id="cards"></div>
+<div class="charts" id="charts"></div>
+<section class="panel" id="resources" hidden>
+<label>Resource time series <select id="resource"></select></label>
+<div id="resource-chart"></div>
+<p>Resource points show the highest sampled value in each time bucket.</p>
+</section>
+<section class="panel" id="summaries" hidden>
+<h2>Recorded run summaries</h2>
+<div class="scroll" id="summary-table"></div>
+</section>
+</main>
+<script id="data" type="application/json"><!--DATA--></script>
+<script>
+'use strict';
+const data = JSON.parse(document.getElementById('data').textContent);
+const get = id => document.getElementById(id);
+const controls = Object.fromEntries(['scenario','run','phase','region','mode','resource'].map(id => [id,get(id)]));
+const fmt = new Intl.NumberFormat(undefined,{maximumFractionDigits:2});
+const format = value => value == null ? '—' : fmt.format(value);
+const palette = ['var(--blue)','var(--purple)','var(--orange)','var(--red)'];
+const node = (tag,text) => {
+  const element = document.createElement(tag);
+  if (text != null) element.textContent = text;
+  return element;
+};
+const svg = (tag,attrs,text) => {
+  const element = document.createElementNS('http://www.w3.org/2000/svg',tag);
+  for (const [key,value] of Object.entries(attrs)) element.setAttribute(key,value);
+  if (text != null) element.textContent = text;
+  return element;
+};
+function options(select, values, all, preferred) {
+  const previous = select.value;
+  select.replaceChildren();
+  if (all) select.add(new Option(all,''));
+  Array.from(new Set(values.filter(value => value != null))).sort().forEach(value => select.add(new Option(value,value)));
+  if (Array.from(select.options).some(option => option.value === previous)) select.value = previous;
+  else if (preferred != null) select.value = preferred;
+  select.disabled = select.options.length <= 1;
+}
+function card(label,value,suffix='') {
+  const div = node('div');
+  div.className = 'stat';
+  div.append(node('span',label),node('strong',value == null ? '—' : format(value)+suffix));
+  get('cards').append(div);
+}
+function chart(title,yLabel,lines) {
+  lines = lines.filter(line => line.points.length);
+  if (!lines.length) return null;
+  const box = node('div');
+  box.className = 'panel';
+  box.append(node('h2',title));
+  const points = lines.flatMap(line => line.points);
+  const xs = points.map(point => point[0]), ys = points.map(point => point[1]);
+  const lo = Math.min(0,...xs), hi = Math.max(lo+1,...xs), top = Math.max(1,...ys)*1.08;
+  const x = time => 57+(time-lo)/(hi-lo)*475, y = value => 164-value/top*138;
+  const graph = svg('svg',{viewBox:'0 0 555 202',role:'img','aria-label':title});
+  for(let step=0;step<=4;step++) {
+    const value = step*top/4, time = lo+(hi-lo)*step/4;
+    graph.append(svg('line',{x1:57,x2:532,y1:y(value),y2:y(value),stroke:'var(--line)'}),
+                 svg('text',{x:51,y:y(value)+4,'text-anchor':'end'},format(value)),
+                 svg('text',{x:x(time),y:180,'text-anchor':'middle'},format(time)));
+  }
+  graph.append(svg('text',{x:57,y:12},yLabel),svg('text',{x:295,y:197,'text-anchor':'middle'},'Seconds from run window'));
+  const key = node('div'); key.className = 'legend';
+  lines.forEach((line,index) => {
+    const color = palette[index % palette.length], label = node('span',line.label);
+    label.style.setProperty('--series',color); key.append(label);
+    const path = line.points.map(([time,value],i) =>
+      `${i && (!line.gap || time-line.points[i-1][0]<=line.gap) ? 'L' : 'M'}${x(time)} ${y(value)}`).join(' ');
+    graph.append(svg('path',{d:path,fill:'none',stroke:color,'stroke-width':2}));
+    for (const [time,value] of line.points) {
+      const dot = svg('circle',{cx:x(time),cy:y(value),r:2.5,fill:color});
+      dot.append(svg('title',{},`${line.label} at ${format(time)} s: ${format(value)}`)); graph.append(dot);
+    }
+  });
+  box.append(graph,key); return box;
+}
+function draw(run) {
+  const evidence = get('evidence'), cards = get('cards'), charts = get('charts');
+  evidence.replaceChildren(); cards.replaceChildren(); charts.replaceChildren();
+  const notice = (text,warning=false) => {
+    const p = node('p',text); if (warning) p.className = 'warning'; evidence.append(p);
+  };
+  if (!run.finished) notice('The runner did not publish a completed metrics file for this run.',true);
+  if (run.source) {
+    const source = run.source;
+    notice(`Run source ${source.commit.slice(0,12)} · sampler CPUs ${source.sampler_cpus_requested}`);
+    if (source.dirty_sources) notice('Source inputs differed from that revision. Verify the hashes in the run manifest.',true);
+  }
+  if (run.partial.length) notice('Partial capture files are retained outside the analytics.',true);
+  if (run.capture_error) notice('Raw capture could not be read. See the offline generator log.',true);
+  if (run.ticket_error) notice('Ticket outcomes could not be read. See the offline generator log.',true);
+  if (!run.coverage.length) notice('This run has no raw k6 capture. Available summaries and resource samples are shown below.');
+  for (const part of run.coverage) {
+    const complete = part.expected != null && part.expected === part.attempts && !run.duplicate_attempts && !run.invalid_attempts;
+    notice(`${part.source}: ${format(part.attempts)} recorded attempts, ${format(part.expected)} completed iterations, ${format(part.http)} HTTP duration samples.${complete ? '' : ' Check capture coverage before using these statistics.'}`,!complete);
+  }
+  const phase = controls.phase.value;
+  const cohort = r => `${r.source} / ${r.phase}` === phase &&
+    (r.region ?? '') === controls.region.value && (r.mode ?? '') === controls.mode.value;
+  const overall = (run.groups || []).find(cohort);
+  const tickets = run.tickets;
+  const ticket = (tickets?.groups || []).find(cohort);
+  const bucket = run.bucket_seconds;
+  const pct = (n,total) => total ? 100*n/total : null;
+  const add = (title,unit,lines) => {const panel=chart(title,unit,lines); if(panel) charts.append(panel);};
+  if (overall) {
+    card('Observed attempts',overall.n);
+    card('Accepted within 200 ms',pct(overall.accepted_200ms,overall.n),'%');
+    card('Mean client latency',overall.mean_ms,' ms');
+    card('Client latency p95',overall.p95_ms,' ms');
+    card('Client latency p99',overall.p99_ms,' ms');
+    const timeline = run.timeline.filter(cohort);
+    const line = (label,fn) => ({label,gap:bucket,points:timeline.map(r=>[r.bucket*bucket,fn(r)]).filter(r=>r[1]!=null)});
+    const dropPoints = (run.drops || []).filter(r=>`${r.source} / ${r.phase}`===phase);
+    const all = !controls.region.value && !controls.mode.value;
+    add('Join throughput',`Attempts per ${format(bucket)} s`,[
+      line('Observed attempts',r=>r.n),line('Accepted',r=>r.accepted),
+      {label:'Dropped before sending',points:all?dropPoints.map(r=>[r.bucket*bucket,r.dropped]):[]}]);
+    add('Client latency','Milliseconds',[
+      line('Mean',r=>r.mean_ms),line('p95',r=>r.p95_ms),line('p99',r=>r.p99_ms)]);
+  }
+  if (ticket) {
+    card('Accepted tickets',ticket.tickets);
+    card('Matched within 10 s',pct(ticket.matched_10s,ticket.tickets),'%');
+    card('Matched within 60 s',pct(ticket.matched_60s,ticket.tickets),'%');
+    card('Matched ticket p95',ticket.p95_ms==null?null:ticket.p95_ms/1000,' s');
+    card('Unresolved tickets',ticket.unresolved);
+    if (!tickets.outcomes_present) notice('Ticket outcomes were unavailable. Accepted tickets remain unresolved.',true);
+    if (tickets.duplicate_outcomes || tickets.unmatched_outcomes || tickets.early_outcomes) {
+      notice(`Ticket log coverage: ${tickets.duplicate_outcomes} duplicate, ${tickets.unmatched_outcomes} unmatched, ${tickets.early_outcomes} before acceptance.`,true);
+    }
+    const timeline = tickets.timeline.filter(cohort);
+    const line = (label,fn) => ({label,gap:bucket,points:timeline.map(r=>[r.bucket*bucket,fn(r)]).filter(r=>r[1]!=null)});
+    add('Ticket outcomes by acceptance time','Tickets',[
+      line('Matched',r=>r.matched),line('Expired',r=>r.expired),
+      line('Cancelled',r=>r.cancelled),line('Unresolved',r=>r.unresolved)]);
+    add('Matched ticket wait','Seconds',[
+      line('Mean',r=>r.mean_ms==null?null:r.mean_ms/1000),
+      line('p95',r=>r.p95_ms==null?null:r.p95_ms/1000),
+      line('p99',r=>r.p99_ms==null?null:r.p99_ms/1000)]);
+  }
+  const summary = get('summaries'), entries = Object.entries(run.metrics);
+  summary.hidden = !entries.length;
+  const table = node('table'), head = node('tr');
+  head.append(node('th','Metric'),node('th','Value')); table.append(head);
+  entries.sort().forEach(([metric,value])=>{
+    const tr=node('tr'); tr.append(node('td',metric),node('td',format(value))); table.append(tr);
+  });
+  get('summary-table').replaceChildren(table);
+  const resource = get('resources');
+  resource.hidden = !run.resources.length;
+  options(controls.resource,run.resources.map(r=>r.label));
+  const renderResource = () => {
+    const selected = run.resources.find(r=>r.label === controls.resource.value);
+    get('resource-chart').replaceChildren();
+    if (selected) get('resource-chart').append(chart(selected.label,'', [selected]));
+  };
+  controls.resource.onchange = renderResource;
+  renderResource();
+}
+function refresh() {
+  const runs = data.filter(r => r.scenario === controls.scenario.value);
+  options(controls.run,runs.map(r=>r.run),null,runs.find(r=>r.groups?.length)?.run);
+  const run = runs.find(r=>r.run === controls.run.value);
+  if (!run) return;
+  const groups = run.groups || [];
+  options(controls.phase,groups.map(r=>`${r.source} / ${r.phase}`));
+  const scoped = groups.filter(r=>`${r.source} / ${r.phase}` === controls.phase.value);
+  options(controls.region,scoped.map(r=>r.region),'All regions');
+  options(controls.mode,scoped.filter(r=>(r.region??'')===controls.region.value).map(r=>r.mode),'All modes');
+  draw(run);
+}
+options(controls.scenario,data.map(r=>r.scenario),null,data.find(r=>r.groups?.length)?.scenario);
+if (!data.length) get('evidence').append(node('p','No runs were found.'));
+for (const [name,select] of Object.entries(controls)) if(name!=='resource') select.onchange=refresh;
+refresh();
+</script>
+</body>
+</html>

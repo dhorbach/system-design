@@ -10,6 +10,7 @@
 // Only the `measure` part is judged; the warm-up is thrown away.
 import http from 'k6/http';
 import { check } from 'k6';
+import { recordAttempt } from './capture.js';
 
 const env = (k, d) => (__ENV[k] === undefined || __ENV[k] === '' ? d : __ENV[k]);
 const RATE = +env('RATE', 50), DURATION = env('DURATION', '60s'), WARMUP = env('WARMUP', '15s');
@@ -31,14 +32,14 @@ if (SHAPE === 'ramp') {
   });
 } else if (SHAPE === 'spike') {
   const peakFor = env('PEAK_FOR', '10s');
-  scenarios.warmup = arrival(RATE, WARMUP, '0s');
+  if (parseFloat(WARMUP) > 0) scenarios.warmup = arrival(RATE, WARMUP, '0s');
   scenarios.measure = {
     executor: 'ramping-arrival-rate', startRate: +env('PEAK', RATE * 10), timeUnit: '1s', startTime: WARMUP,
     preAllocatedVUs: VUS, maxVUs: VUS,
     stages: [{ target: +env('PEAK', RATE * 10), duration: peakFor }, { target: RATE, duration: '0s' }, { target: RATE, duration: DURATION }],
   };
 } else {
-  scenarios.warmup = arrival(RATE, WARMUP, '0s');
+  if (parseFloat(WARMUP) > 0) scenarios.warmup = arrival(RATE, WARMUP, '0s');
   scenarios.measure = arrival(RATE, DURATION, WARMUP);
 }
 
@@ -62,7 +63,9 @@ export default function () {
   const key = `${__VU}-${seq++}-${Date.now()}`;
   const url = env('TARGET', 'http://toxiproxy:9001/do?ms=5');
   // The key travels in headers, so the URL stays the same and k6 keeps one series, not one per request.
-  const res = http.get(url, { headers: { 'X-Bench-Key': key, 'X-Bench-Due': String(Date.now()) } });
+  const sent = Date.now();
+  const res = http.get(url, { headers: { 'X-Bench-Key': key, 'X-Bench-Due': String(sent) } });
+  recordAttempt({ request_id: key, sent_ms: sent, observed_ms: Date.now(), status: res.status });
   check(res, { 'status 2xx': (r) => r.status >= 200 && r.status < 300 });
 }
 

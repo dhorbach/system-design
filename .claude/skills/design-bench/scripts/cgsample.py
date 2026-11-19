@@ -124,6 +124,13 @@ def sample_host():
 
 
 def run(args):
+    if args.cpus:
+        cpus = cpu_set(args.cpus)
+        if cpus & cpu_set(args.exclude_cpus):
+            sys.exit(f"Monitoring CPU set {args.cpus} overlaps the bench CPU sets")
+        if not cpus <= os.sched_getaffinity(0):
+            sys.exit(f"Monitoring CPU set {args.cpus} is outside the host process affinity")
+        os.sched_setaffinity(0, cpus)
     stop = []
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
@@ -132,7 +139,8 @@ def run(args):
         while not stop:
             units = compose_units(args.project)
             t = int(time.time() * 1000)
-            out.write(json.dumps({"t": t, "unit": "host", **sample_host()}) + "\n")
+            out.write(json.dumps({"t": t, "unit": "host", "sampler_cpus": sorted(os.sched_getaffinity(0)),
+                                  **sample_host()}) + "\n")
             for name, (path, ident, service) in units.items():
                 out.write(json.dumps({"t": t, "unit": name, "id": ident[:12],
                                       "service": service, **sample_unit(path)}) + "\n")
@@ -174,6 +182,8 @@ def summarize(args):
                            "cpu_busy_max": round(max(busy), 4),
                            "psi_cpu": round((last["psi_cpu"] - first["psi_cpu"]) / 1e6 / secs, 4),
                            "psi_io": round((last["psi_io"] - first["psi_io"]) / 1e6 / secs, 4)}
+            if last.get("sampler_cpus"):
+                out["host"]["sampler_cpus"] = last["sampler_cpus"]
             continue
         # A restarted container has a new id and its counters start again: add up per id.
         segs, cur = [], [rs[0]]
@@ -266,6 +276,8 @@ def main():
     r.add_argument("--project", required=True, help="compose project name")
     r.add_argument("--out", required=True)
     r.add_argument("--interval", type=float, default=2.0)
+    r.add_argument("--cpus", help="host CPU set for the sampler")
+    r.add_argument("--exclude-cpus", default="", help="CPU sets which the sampler must avoid")
     s = sub.add_parser("summarize")
     s.add_argument("samples")
     s.add_argument("--from", dest="frm", type=int, default=0, help="window start, Unix ms")

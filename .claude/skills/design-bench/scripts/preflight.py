@@ -76,14 +76,23 @@ def cpus():
         # Unequal cores: the measured side gets one kind only, or a "0.5 CPU" limit means two things.
         n = len(fast)
         cut = max(2, (n * 5 // 8) // 2 * 2)
+        aux, load = slow[:len(slow) // 2], slow[len(slow) // 2:]
+        monitor = next((group for group in reversed(list(cores.values()))
+                        if set(group) < set(aux)), [])
         info["map"] = {"sut": fmt_cpus(fast[:cut]), "data": fmt_cpus(fast[cut:]),
-                       "aux": fmt_cpus(slow[:len(slow) // 2]), "load": fmt_cpus(slow[len(slow) // 2:])}
+                       "aux": fmt_cpus(set(aux) - set(monitor)), "load": fmt_cpus(load),
+                       "mon": fmt_cpus(monitor)}
     else:
-        ordered = [c for sib in cores.values() for c in sib]  # siblings stay together
-        n = len(ordered)
-        a, b, c = n // 2, n * 3 // 4, n * 7 // 8
-        info["map"] = {"sut": fmt_cpus(ordered[:a]), "data": fmt_cpus(ordered[a:b]),
-                       "aux": fmt_cpus(ordered[b:c]), "load": fmt_cpus(ordered[c:])}
+        groups = list(cores.values())
+        monitor = groups.pop() if len(groups) >= 5 else []
+        n = len(groups)
+        a = n // 2
+        b = min(n * 3 // 4, n - 2) if n >= 4 else n * 3 // 4
+        c = max(b + 1, n * 7 // 8) if n >= 4 else n * 7 // 8
+        slices = {"sut": groups[:a], "data": groups[a:b], "aux": groups[b:c], "load": groups[c:]}
+        info["map"] = {name: fmt_cpus(cpu for group in bucket for cpu in group)
+                       for name, bucket in slices.items()}
+        info["map"]["mon"] = fmt_cpus(monitor)
     return info
 
 
@@ -154,6 +163,8 @@ def main():
     if facts["cpu"]["hybrid"]:
         notes.append(f"Hybrid CPU: fast cores {facts['cpu']['fast_cpus']}, slow cores {facts['cpu']['slow_cpus']}. "
                      "Pin everything that is measured to one kind; an unpinned limit means a different speed on each run.")
+    if not facts["cpu"]["map"]["mon"]:
+        notes.append("No dedicated monitoring CPU in the suggested split. Reserve a physical core if possible.")
     if facts["cpu"]["governor"] and facts["cpu"]["governor"] != "performance":
         notes.append(f"CPU governor is '{facts['cpu']['governor']}': expect more run-to-run spread at low load. Record it in the report.")
     if psi60 is not None and psi60 > 5:
@@ -180,7 +191,8 @@ def main():
     print(f"Limits    cgroup controllers: {' '.join(controllers) or 'none'}")
     print(f"Delays    netem: {'yes' if facts['netem'] else 'no'}; Toxiproxy runs as a container")
     print(f"CPU map   measured services {c['map']['sut']} | datastores {c['map']['data']} | "
-          f"stand-ins and proxies {c['map']['aux']} | load generator {c['map']['load']}")
+          f"stand-ins and proxies {c['map']['aux']} | load generator {c['map']['load']} | "
+          f"monitoring {c['map']['mon'] or 'shares auxiliary CPUs'}")
     for p in problems:
         print("PROBLEM  ", p)
     for n in notes:

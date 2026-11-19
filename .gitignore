@@ -3,3 +3,5 @@ __pycache__/
 _dev/
 drafts/
 bench/*/results/**/samples.jsonl
+bench/*/results/**/raw/
+bench/*/analytics/

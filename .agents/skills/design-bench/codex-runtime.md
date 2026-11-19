@@ -52,7 +52,7 @@ execution, gates and report.
   Say that it is a local file. Do not claim it is published and do not upload it
   to any service. Also print the verdict table (`verdict.py judge` prints it as
   Markdown) in chat, so the gate can be answered without opening the page. Skip
-  `bench-report.url`.
+  `bench-report.url`. Link the local analytics dashboard when available.
 - **Agent** (a fresh-context run, if a shared reference asks for one): use an
   available subagent tool and pass it the repository root and the exact file
   paths. If delegation is unavailable, do the pass yourself and say it was not

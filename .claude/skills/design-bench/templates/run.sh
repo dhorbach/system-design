@@ -20,6 +20,13 @@ run="${2:-$(date +%Y%m%d-%H%M%S)}"
 OUT="results/$scenario/$run"
 mkdir -p "results/$scenario"
 mkdir "$OUT"  # Refuse to overwrite a previous run, even if it failed.
+python3 "$SKILL/provenance.py" "$PWD" "$SLUG" "$OUT/source.json" \
+  --capture "${RAW_CAPTURE:-1}" --sampler-cpus "${CPUS_MON:-$CPUS_AUX}"
+RAW_STAGE=""
+if [[ "${RAW_CAPTURE:-1}" == 1 ]]; then
+  mkdir "$OUT/raw"
+  RAW_STAGE=$(mktemp -d "$(realpath "${RAW_STAGE_ROOT:-$OUT/raw}")/k6.XXXXXXXX")
+fi
 
 # ---- the bench's verbs -------------------------------------------------------
 now_ms()   { date +%s%3N; }
@@ -43,18 +50,61 @@ crash()     { $DC kill -s KILL "$1" >/dev/null; }
 freeze()    { $DC pause "$1"; }
 thaw()      { $DC unpause "$1"; }
 
-sampler_start() { python3 "$SKILL/cgsample.py" run --project "$PROJECT" --out "$OUT/samples.jsonl" --interval "${1:-2}" & SAMPLER=$!; }
+sampler_start() {
+  local exclude="$CPUS_SUT,$CPUS_DATA,$CPUS_LOAD"
+  [[ -z "${CPUS_MON:-}" ]] || exclude="$exclude,$CPUS_AUX"
+  python3 "$SKILL/cgsample.py" run --project "$PROJECT" --out "$OUT/samples.jsonl" \
+    --interval "${1:-2}" --cpus "${CPUS_MON:-$CPUS_AUX}" --exclude-cpus "$exclude" &
+  SAMPLER=$!
+}
 SAMPLER=""
 sampler_stop()  { [ -n "$SAMPLER" ] || return 0; kill "$SAMPLER" 2>/dev/null; wait "$SAMPLER" 2>/dev/null || true; SAMPLER=""; }
-trap 'sampler_stop' EXIT
+archive_raw() {
+  [[ -n "$RAW_STAGE" ]] || return 0
+  local file
+  for file in "$RAW_STAGE"/*; do
+    [[ -f "$file" ]] || continue
+    mv "$file" "$OUT/raw/${file##*/}.tmp"
+    mv "$OUT/raw/${file##*/}.tmp" "$OUT/raw/${file##*/}"
+  done
+  rmdir "$RAW_STAGE"
+  RAW_STAGE=""
+}
+trap 'sampler_stop; archive_raw' EXIT
 
-# k6 exits 99 when a threshold is missed. That is a result, not an error: verdict.py judges.
-load() { local out="$1"; shift; $DC --profile load run --rm -T --name "$PROJECT-k6" k6 run --quiet -e OUT="$scenario/$run/$out" "$@" /scripts/load.js || [ $? -eq 99 ]; }
+# k6 exits 99 when a threshold is missed. That is a result for verdict.py.
+load() {
+  local out="$1" status=0 raw_file="${1%.json}.k6.jsonl"; shift
+  local -a mount=() capture=()
+  if [[ -n "$RAW_STAGE" ]]; then
+    mount=(--volume "$RAW_STAGE:/bench-raw")
+    capture=(--out "json=/bench-raw/$raw_file.partial" -e BENCH_CAPTURE=1)
+  fi
+  $DC --profile load run --rm -T --name "$PROJECT-k6" "${mount[@]}" k6 run --quiet \
+    -e OUT="$scenario/$run/$out" "${capture[@]}" "$@" /scripts/load.js || status=$?
+  if [[ -n "$RAW_STAGE" ]]; then
+    if [[ "$status" != 0 && "$status" != 99 ]]; then
+      return "$status"
+    elif [[ -s "$RAW_STAGE/$raw_file.partial" ]]; then
+      mv "$RAW_STAGE/$raw_file.partial" "$RAW_STAGE/$raw_file"
+    else
+      echo "Missing k6 raw capture for $out" >&2
+      status=1
+    fi
+  fi
+  [[ "$status" == 0 || "$status" == 99 ]]
+}
 
 # collect <from_ms> <to_ms> [flatten args…]: ledger and resources for the window, merged into metrics.json
 collect() {
   local from="$1" to="$2"; shift 2
   sink "/stats?from=$from&to=$to" > "$OUT/sink.json"
+  if [[ "${RAW_CAPTURE:-1}" == 1 ]]; then
+    sink /dump > "$OUT/raw/sink.csv.tmp"
+    mv "$OUT/raw/sink.csv.tmp" "$OUT/raw/sink.csv"
+    archive_raw
+  fi
+  jq -n --argjson from "$from" --argjson to "$to" '{from_ms: $from, to_ms: $to}' > "$OUT/window.json"
   python3 "$SKILL/cgsample.py" summarize "$OUT/samples.jsonl" --from "$from" --to "$to" > "$OUT/resources.json"
   python3 "$SKILL/verdict.py" flatten sink="$OUT/sink.json" res="$OUT/resources.json" "$@" \
     --set window.seconds="$(( (to - from) / 1000 ))" > "$OUT/metrics.tmp"
@@ -124,6 +174,7 @@ scenario_calibration() {
        loadgen_share_of_its_cpus: ."floorres.k6.cpu_of_set_max", delay_added_ms: ."calib.delay_added_ms",
        burn_cores: ."burnres.burn-1.cpu_cores_avg", burn_throttled_share: ."burnres.burn-1.throttled_share",
        host_busy_max: ."floorres.host.cpu_busy_max", limit_problems: ."calib.limit_problems"}' "$OUT/metrics.tmp"
+  archive_raw
   mv "$OUT/metrics.tmp" "$OUT/metrics.json"
 }
 

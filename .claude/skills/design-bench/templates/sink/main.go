@@ -23,6 +23,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -230,10 +231,14 @@ func dump(w http.ResponseWriter, r *http.Request) {
 	led.mu.Lock()
 	defer led.mu.Unlock()
 	w.Header().Set("Content-Type", "text/csv")
-	fmt.Fprintln(w, "arrived_ms,due_ms,key,class,outcome")
+	out := csv.NewWriter(w)
+	out.Write([]string{"arrived_ms", "due_ms", "key", "class", "outcome"})
 	for _, a := range led.arrivals {
-		fmt.Fprintf(w, "%d,%d,%s,%s,%s\n", a.at, a.due, a.key, a.class, a.outcome)
+		if err := out.Write([]string{strconv.FormatInt(a.at, 10), strconv.FormatInt(a.due, 10), a.key, a.class, a.outcome}); err != nil {
+			return
+		}
 	}
+	out.Flush()
 }
 
 func reset(w http.ResponseWriter, r *http.Request) {

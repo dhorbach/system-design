@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -122,3 +123,45 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(metrics["load.step_0050.dropped_iterations.count"], 0)
         self.assertEqual(metrics["load.step_0100.dropped_iterations.count"], 3)
         self.assertNotIn("load.dropped_iterations.count", metrics)
+
+
+@unittest.skipUnless(importlib.util.find_spec("duckdb"), "offline DuckDB package unavailable")
+class AnalyticsTests(unittest.TestCase):
+    def test_dashboard_preserves_measurement_cohorts_and_ticket_denominator(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            run = root / "results/steady/r1"
+            raw = run / "raw"
+            raw.mkdir(parents=True)
+            (run / "metrics.json").write_text("{}")
+            (run / "k6.json").write_text(json.dumps({"expected_attempts": 3, "metrics": {}}))
+            events = [
+                ("warmup", "w", "warm", 1, "us"),
+                ("measure", "a", "first", 10, "eu"),
+                ("measure", "b", "second", 20, "us"),
+                ("measure", "c", "third", 30, "us"),
+            ]
+            with (raw / "k6.k6.jsonl").open("w") as stream:
+                for phase, request, ticket, latency, region in events:
+                    stream.write(json.dumps({
+                        "type": "Point", "metric": "bench_attempt_ms", "data": {
+                            "time": "2026-01-01T00:00:00Z", "value": latency, "tags": {"scenario": phase},
+                            "metadata": {"bench_request_id": request, "bench_ticket_id": ticket,
+                                         "bench_region": region, "bench_mode": "duel", "bench_status": "200"},
+                        },
+                    }) + "\n")
+            (raw / "tickets.csv").write_text(
+                "ticket_id,outcome,observed_ms\nfirst,matched,1767225605000\nsecond,expired,1767225900000\n")
+            dashboard = root / "dashboard.html"
+            completed = subprocess.run([sys.executable, SKILL / "scripts/analytics.py", root / "results", dashboard],
+                                       check=True, capture_output=True, text=True)
+            self.assertEqual(completed.stderr, "")
+            document = dashboard.read_text()
+            payload = re.search(r'<script id="data" type="application/json">(.*?)</script>', document)
+            report = json.loads(payload.group(1))[0]
+            all_attempts = next(row for row in report["groups"] if row["region"] is None and row["mode"] is None)
+            all_tickets = next(row for row in report["tickets"]["groups"] if row["region"] is None and row["mode"] is None)
+            self.assertEqual((all_attempts["n"], all_attempts["mean_ms"], all_attempts["p95_ms"]), (3, 20, 29))
+            self.assertEqual((all_tickets["tickets"], all_tickets["matched_60s"], all_tickets["unresolved"]), (3, 1, 1))
+            self.assertEqual(report["coverage"][0]["expected"], report["coverage"][0]["attempts"])
+            self.assertTrue((root / "analytics/steady/r1/attempts.parquet").is_file())
