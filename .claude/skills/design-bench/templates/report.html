@@ -1,0 +1,293 @@
+<title>Bench report</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=Source+Serif+4:ital,opsz,wght@1,8..60,400&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+/* Layout: one reading column. Verdict counts and what the bench found on top, one card per claim below
+   (measured range drawn against its target), then the bench's own checks and what could not be tested. */
+:root{
+  --bg:#F3F5F8; --surface:#FFFFFF; --sunken:#E9EDF3; --ink:#18202E; --muted:#5B6577; --line:#D9DFE8; --accent:#2D5BD7;
+  --pass:#1E7F4F; --fail:#C2362F; --unsure:#A86200; --idle:#6F7889;
+  --head:"Space Grotesk",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+  --body:"Inter",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+  --quote:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0F141C; --surface:#171E29; --sunken:#111821; --ink:#E5EAF2; --muted:#98A3B5; --line:#2A3443; --accent:#86A6FF;
+    --pass:#52CF90; --fail:#FF7F75; --unsure:#F2B04A; --idle:#9AA4B4;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0F141C; --surface:#171E29; --sunken:#111821; --ink:#E5EAF2; --muted:#98A3B5; --line:#2A3443; --accent:#86A6FF;
+  --pass:#52CF90; --fail:#FF7F75; --unsure:#F2B04A; --idle:#9AA4B4;
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:400 15px/1.55 var(--body);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:54rem;margin:0 auto;padding-block:36px 80px;display:grid;gap:26px}
+a{color:var(--accent);text-underline-offset:3px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+button{font:inherit;color:inherit}
+code{font:500 .84em var(--mono);background:var(--sunken);padding:.05em .35em;border-radius:4px;overflow-wrap:anywhere}
+p{margin:0}
+
+.top{display:grid;gap:8px}
+.eyebrow{font:500 .78rem var(--head);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+h1{font:700 clamp(1.7rem,4vw,2.3rem)/1.1 var(--head);letter-spacing:-.015em;margin:0;text-wrap:balance}
+h2{font:700 1.25rem/1.25 var(--head);margin:0;text-wrap:balance}
+.lead{font-size:1.05rem;max-width:44rem}
+.facts{margin:0;display:grid;grid-template-columns:6.5rem minmax(0,1fr);gap:4px 12px;font-size:.9rem;color:var(--muted)}
+.facts dt{font:500 .8rem/1.75 var(--head)} .facts dd{margin:0;color:var(--ink)}
+
+.summary{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:grid;gap:2px;align-content:start}
+.tile b{font:600 1.6rem/1.1 var(--head);font-variant-numeric:tabular-nums}
+.tile span{font-size:.8rem;color:var(--muted)}
+.tile.pass b{color:var(--pass)} .tile.fail b{color:var(--fail)} .tile.unsure b{color:var(--unsure)}
+
+section{display:grid;gap:12px;min-width:0}
+.sub{color:var(--muted);font-size:.9rem;max-width:44rem}
+.found{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 18px;display:grid;gap:6px}
+.found h3{font:600 1.02rem/1.35 var(--head);margin:0}
+.found .body{display:grid;gap:8px} .found .body ul{margin:0;padding-left:1.2rem}
+.refs{font-size:.8rem;color:var(--muted)}
+
+.filters{display:flex;flex-wrap:wrap;gap:6px;font-size:.86rem}
+.chip{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:3px 11px;cursor:pointer;color:var(--muted);font-variant-numeric:tabular-nums}
+.chip:hover{color:var(--ink);border-color:var(--muted)}
+.chip[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+
+.list{display:grid;gap:14px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:grid;gap:10px;min-width:0}
+.head{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-size:.8rem}
+.cid{font:500 .8rem var(--mono);color:var(--muted)}
+.pill{font:600 .72rem var(--head);letter-spacing:.04em;text-transform:uppercase;border-radius:5px;padding:2px 7px;border:1px solid currentColor}
+.pill.pass{color:var(--pass)} .pill.fail{color:var(--fail)} .pill.inconclusive{color:var(--unsure)} .pill.not-run,.pill.not-testable{color:var(--idle)}
+.tag{color:var(--muted);background:var(--sunken);border-radius:5px;padding:2px 7px}
+.card h3{font:600 1.05rem/1.35 var(--head);margin:0;text-wrap:balance}
+blockquote{margin:0;padding:8px 12px;border-radius:8px;background:var(--sunken);font:italic 400 .98rem/1.5 var(--quote);overflow-wrap:anywhere}
+.note{font-size:.9rem;color:var(--muted)}
+
+/* measured range against target, one row per check */
+.check{display:grid;gap:4px}
+.check .lab{display:flex;flex-wrap:wrap;gap:2px 12px;justify-content:space-between;font-size:.86rem;font-variant-numeric:tabular-nums}
+.check .lab code{background:none;padding:0;color:var(--muted)}
+.track{position:relative;height:22px;border-radius:4px;background:var(--sunken)}
+.track .range{position:absolute;top:7px;height:8px;border-radius:4px;min-width:3px}
+.track .dot{position:absolute;top:6px;width:10px;height:10px;margin-left:-5px;border-radius:50%;border:2px solid var(--surface)}
+.track .median{position:absolute;top:3px;width:3px;height:16px;margin-left:-1.5px;border-radius:2px;background:var(--ink)}
+.track .target{position:absolute;top:-3px;bottom:-3px;width:0;border-left:2px dashed var(--ink)}
+.track .ok{background:var(--pass)} .track .bad{background:var(--fail)}
+.key{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.78rem;color:var(--muted)}
+.key i{display:inline-block;vertical-align:-1px;margin-right:5px}
+.key .k-run{width:10px;height:10px;border-radius:50%;background:var(--muted)} .key .k-med{width:3px;height:12px;border-radius:2px;background:var(--ink)} .key .k-tgt{width:0;height:12px;border-left:2px dashed var(--ink)}
+details{font-size:.86rem} summary{cursor:pointer;color:var(--muted)}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.86rem;font-variant-numeric:tabular-nums}
+th{font:500 .78rem var(--head);color:var(--muted);text-align:left} th,td{padding:5px 12px 5px 0;border-bottom:1px solid var(--line);vertical-align:top}
+td.n{font-family:var(--mono);font-size:.8rem;white-space:nowrap}
+
+.plain{margin:0;padding:0;list-style:none;display:grid;gap:8px}
+.plain li{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;align-items:baseline}
+.plain .st{font:600 .72rem var(--head);letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
+.st.pass{color:var(--pass)} .st.fail{color:var(--fail)} .st.inconclusive,.st.not-run{color:var(--unsure)}
+
+.chart{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:grid;gap:6px;min-width:0;position:relative}
+.chart h3{font:600 1rem/1.3 var(--head);margin:0}
+.chart .plot{overflow-x:auto;position:relative}
+.chart svg{width:100%;min-width:520px;height:auto;display:block}
+.chart text{font:400 11px var(--body);fill:var(--muted)}
+.tip{position:absolute;pointer-events:none;background:var(--ink);color:var(--bg);font-size:.78rem;padding:4px 8px;border-radius:6px;white-space:nowrap;font-variant-numeric:tabular-nums;transform:translate(-50%,-135%)}
+pre{margin:0;background:var(--sunken);border-radius:8px;padding:10px 12px;overflow-x:auto;font:500 .8rem/1.5 var(--mono)}
+.foot{font-size:.82rem;color:var(--muted)}
+
+@media (max-width:640px){
+  .summary{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .facts{grid-template-columns:1fr} .facts dt{line-height:1.3}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow" id="eyebrow">Bench report</div>
+    <h1 id="dtitle">Bench report</h1>
+    <p class="lead" id="lead"></p>
+    <dl class="facts" id="facts"></dl>
+  </header>
+
+  <section class="summary" aria-label="Verdicts">
+    <div class="tile pass"><b id="n-pass">0</b><span>Hold</span></div>
+    <div class="tile fail"><b id="n-fail">0</b><span>Do not hold</span></div>
+    <div class="tile unsure"><b id="n-inconclusive">0</b><span>Inconclusive</span></div>
+    <div class="tile"><b id="n-not-run">0</b><span>Not run</span></div>
+    <div class="tile"><b id="n-not-testable">0</b><span>Not testable here</span></div>
+  </section>
+
+  <section id="found-sec" hidden>
+    <h2>What the bench found</h2>
+    <div class="list" id="found"></div>
+  </section>
+
+  <section id="curves-sec" hidden>
+    <h2>Where it bends</h2>
+    <div class="list" id="curves"></div>
+  </section>
+
+  <section>
+    <h2>Claims</h2>
+    <p class="sub">Each card is one promise or number of the page and the check that could disprove it. A claim holds only when every valid run passes; runs that disagree leave it inconclusive.</p>
+    <nav class="filters" id="filters" aria-label="Filter claims"></nav>
+    <div class="key" aria-hidden="true"><span><i class="k-run"></i>one run</span><span><i class="k-med"></i>median</span><span><i class="k-tgt"></i>target</span></div>
+    <main class="list" id="list"></main>
+  </section>
+
+  <section id="calib-sec" hidden>
+    <h2>Was the bench sound</h2>
+    <p class="sub">Checked before any claim: the limits bite, the injected delay is the delay asked for, the load generator keeps up, the ledger counts right. Controls plant a fault to show a check can fail.</p>
+    <ul class="plain" id="calib"></ul>
+  </section>
+
+  <section id="runs-sec" hidden>
+    <h2>What was run</h2>
+    <div class="scroll"><table id="runs"></table></div>
+  </section>
+
+  <section id="repro-sec" hidden>
+    <h2>Run it again</h2>
+    <pre id="repro"></pre>
+  </section>
+  <p class="foot" id="foot"></p>
+</div>
+
+<script type="application/json" id="report-data">
+{"design":{"title":"Example","source":"pages/example.html"},"bench":{"host":"example host","scale":"example scale"},
+ "judged":"2026-01-01 00:00","counts":{},"claims":[],"controls":[],"calibration":[]}
+</script>
+
+<script>
+(function(){
+const $=s=>document.querySelector(s);
+const D=JSON.parse($('#report-data').textContent);
+const el=(tag,cls,text)=>{const e=document.createElement(tag); if(cls) e.className=cls; if(text!=null) e.textContent=text; return e;};
+const html=(tag,cls,markup)=>{const e=el(tag,cls); e.innerHTML=markup||''; return e;};  /* markup is written by Claude into the report data, never by viewers */
+const fmt=v=>v==null?'–':(Math.abs(v)>=100||Number.isInteger(v)?Math.round(v).toLocaleString('en-US'):Number(v.toPrecision(3)).toLocaleString('en-US',{maximumFractionDigits:4}));
+const OPS={'<=':'at most','<':'under','>=':'at least','>':'over','==':'exactly','!=':'not'};
+const holds=(op,v,t)=>({'<=':v<=t,'<':v<t,'>=':v>=t,'>':v>t,'==':v===t,'!=':v!==t})[op];
+const EVID={measured:'measured at the design’s size',scaled:'measured at bench scale',extrapolated:'extrapolated from measurements',analytic:'arithmetic',untestable:'not testable on one machine'};
+
+const d=D.design||{}, b=D.bench||{};
+document.title=(d.title?d.title+' bench':'Bench report');
+$('#dtitle').textContent=d.title||'Bench report';
+$('#eyebrow').textContent='Bench report'+(D.judged?' · '+D.judged:'');
+if(D.lead) $('#lead').innerHTML=D.lead; else $('#lead').hidden=true;
+[['Page',d.source],['Machine',b.host],['Scale',b.scale]].forEach(([k,v])=>{ if(!v) return; $('#facts').append(el('dt',null,k),el('dd',null,v)); });
+['pass','fail','inconclusive','not-run','not-testable'].forEach(k=>{$('#n-'+k).textContent=(D.counts||{})[k]||0;});
+
+/* what the bench found */
+if((D.findings||[]).length){ $('#found-sec').hidden=false;
+  D.findings.forEach(f=>{const c=el('article','found'); c.appendChild(el('h3',null,f.title)); c.appendChild(html('div','body',f.body));
+    if((f.claims||[]).length) c.appendChild(el('div','refs','Claims: '+f.claims.join(', '))); $('#found').appendChild(c);}); }
+
+/* one check: measured runs, median and target on one scale */
+function checkRow(c, s){
+  const row=el('div','check'), lab=el('div','lab');
+  const unit=s.unit?' '+s.unit:'', numT=typeof s.target==='number';
+  lab.appendChild(el('span',null,'Median '+fmt(s.median)+unit+(s.min!==s.max?' (runs: '+fmt(s.min)+' to '+fmt(s.max)+')':'')+'; target '+(OPS[s.op]||s.op)+' '+(numT?fmt(s.target)+unit:s.target)));
+  lab.appendChild(el('code',null,s.metric));
+  row.appendChild(lab);
+  if(!numT) return row;
+  const vals=(c.runs||[]).filter(r=>r.valid).map(r=>r.values[s.metric]).filter(v=>v!=null);
+  const hi=Math.max(s.target,s.max,1e-9)*1.2, lo=Math.min(0,s.min), pos=v=>((v-lo)/(hi-lo)*100).toFixed(2)+'%';
+  const tr=el('div','track'); tr.setAttribute('role','img'); tr.setAttribute('aria-label',lab.firstChild.textContent);
+  const ok=holds(s.op,s.max,s.target)&&holds(s.op,s.min,s.target);
+  const rg=el('span','range '+(ok?'ok':'bad')); rg.style.left=pos(s.min); rg.style.width=((s.max-s.min)/(hi-lo)*100).toFixed(2)+'%'; tr.appendChild(rg);
+  vals.forEach(v=>{const dt=el('span','dot '+(holds(s.op,v,s.target)?'ok':'bad')); dt.style.left=pos(v); dt.title=fmt(v)+unit; tr.appendChild(dt);});
+  const md=el('span','median'); md.style.left=pos(s.median); md.title='median '+fmt(s.median)+unit; tr.appendChild(md);
+  const tg=el('span','target'); tg.style.left=pos(s.target); tg.title='target '+fmt(s.target)+unit; tr.appendChild(tg);
+  row.appendChild(tr); return row;
+}
+function card(c){
+  const a=el('article','card'); a.dataset.verdict=c.verdict; a.id='claim-'+c.id;
+  const h=el('div','head'); h.appendChild(el('span','cid',c.id)); h.appendChild(el('span','pill '+c.verdict,c.label||c.verdict));
+  if(c.kind) h.appendChild(el('span','tag',c.kind));
+  if(c.evidence) h.appendChild(el('span','tag',EVID[c.evidence]||c.evidence));
+  if(c.scenario&&c.evidence!=='untestable') h.appendChild(el('span','tag','scenario '+c.scenario));
+  a.appendChild(h); a.appendChild(el('h3',null,c.statement||''));
+  if(c.quote) a.appendChild(el('blockquote',null,c.quote));
+  (c.summary||[]).forEach(s=>a.appendChild(checkRow(c,s)));
+  if(c.note) a.appendChild(el('p','note',c.note));
+  if(c.basis) a.appendChild(el('p','note','Why this stands for the design: '+c.basis));
+  if((c.controls||[]).length) a.appendChild(el('p','note','Guarded by control '+c.controls.join(', ')+'.'));
+  if((c.runs||[]).length){ const dt=el('details'); dt.appendChild(el('summary',null,c.runs.length+' run'+(c.runs.length>1?'s':'')));
+    const wrap=el('div','scroll'), t=el('table'); const metrics=[...new Set((c.checks||[{metric:c.metric}]).map(x=>x.metric))];
+    const hr=el('tr'); ['Run',...metrics,'Result'].forEach(x=>hr.appendChild(el('th',null,x))); t.appendChild(hr);
+    c.runs.forEach(r=>{const tr=el('tr'); tr.appendChild(el('td','n',r.run)); metrics.forEach(m=>tr.appendChild(el('td','n',fmt(r.values[m]))));
+      tr.appendChild(el('td',null,r.valid?(r.pass?'passes':'fails'):'not valid: '+r.why_invalid.join('; '))); t.appendChild(tr);});
+    wrap.appendChild(t); dt.appendChild(wrap); a.appendChild(dt); }
+  return a;
+}
+const ORDER=['fail','inconclusive','pass','not-run','not-testable'], NAMES={fail:'Do not hold',inconclusive:'Inconclusive',pass:'Hold','not-run':'Not run','not-testable':'Not testable here'};
+const claims=(D.claims||[]).slice().sort((x,y)=>ORDER.indexOf(x.verdict)-ORDER.indexOf(y.verdict));
+claims.forEach(c=>$('#list').appendChild(card(c)));
+if(!claims.length) $('#list').appendChild(el('p','sub','No claims yet.'));
+let filter='all';
+function chip(key,label,n){const bt=el('button','chip',label+' '+n); bt.type='button'; bt.setAttribute('aria-pressed',String(filter===key));
+  bt.onclick=()=>{filter=key; document.querySelectorAll('#filters .chip').forEach(x=>x.setAttribute('aria-pressed','false')); bt.setAttribute('aria-pressed','true');
+    document.querySelectorAll('#list .card').forEach(x=>{x.hidden=key!=='all'&&x.dataset.verdict!==key;});}; return bt;}
+$('#filters').appendChild(chip('all','All',claims.length));
+ORDER.forEach(k=>{const n=claims.filter(c=>c.verdict===k).length; if(n) $('#filters').appendChild(chip(k,NAMES[k],n));});
+
+/* the bench's own checks */
+const own=[...(D.calibration||[]).map(c=>['Bench',c]),...(D.controls||[]).map(c=>['Control',c])];
+if(own.length){ $('#calib-sec').hidden=false;
+  own.forEach(([kind,c])=>{const li=el('li'); li.appendChild(el('span','st '+c.verdict,c.label||c.verdict));
+    const t=el('span'); t.appendChild(el('code',null,c.id)); t.append(' '+(c.statement||''));
+    const got=(c.summary||[]).map(s=>fmt(s.median)+(s.unit?' '+s.unit:'')).join('; '); if(got) t.appendChild(el('span','note',' ('+kind.toLowerCase()+' measured '+got+')'));
+    li.appendChild(t); $('#calib').appendChild(li);}); }
+
+/* scenarios */
+if((D.runs||[]).length){ $('#runs-sec').hidden=false; const t=$('#runs'); const hr=el('tr'); ['Scenario','What it offered','Runs'].forEach(x=>hr.appendChild(el('th',null,x))); t.appendChild(hr);
+  D.runs.forEach(r=>{const tr=el('tr'); tr.appendChild(el('td','n',r.scenario)); tr.appendChild(el('td',null,r.what||'')); tr.appendChild(el('td','n',String(r.runs==null?'':r.runs))); t.appendChild(tr);}); }
+if(D.reproduce){ $('#repro-sec').hidden=false; $('#repro').textContent=D.reproduce; }
+$('#foot').textContent='A claim that holds was not disproved by these runs on this machine; it is evidence, not proof, and it says nothing about what the bench could not reproduce.';
+
+/* curves: measured points, an optional fitted line and a target rule, one axis each */
+const NS='http://www.w3.org/2000/svg';
+const sv=(tag,attrs)=>{const e=document.createElementNS(NS,tag); for(const k in attrs) e.setAttribute(k,attrs[k]); return e;};
+function ticks(lo,hi,n){const step=Math.pow(10,Math.floor(Math.log10((hi-lo)/n))); const m=[1,2,5,10].find(f=>(hi-lo)/(step*f)<=n)||10; const s=step*m, out=[]; for(let v=Math.ceil(lo/s)*s; v<=hi+1e-9; v+=s) out.push(+v.toPrecision(12)); return out;}
+function curve(c){
+  const box=el('figure','chart'); box.style.margin='0'; box.appendChild(el('h3',null,c.title));
+  const W=640,H=260,L=56,R=70,T=14,B=38, pts=(c.points||[]).slice().sort((p,q)=>p[0]-q[0]), fit=c.fit||[];
+  const xs=[...pts,...fit].map(p=>p[0]), ys=[...pts,...fit].map(p=>p[1]).concat(c.target!=null?[c.target]:[]);
+  const x0=Math.min(0,...xs), x1=Math.max(...xs), y0=0, y1=Math.max(...ys)*1.1||1;
+  const X=v=>L+(v-x0)/((x1-x0)||1)*(W-L-R), Y=v=>H-B-(v-y0)/((y1-y0)||1)*(H-T-B);
+  const s=sv('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':c.title});
+  ticks(y0,y1,4).forEach(v=>{s.appendChild(sv('line',{x1:L,x2:W-R,y1:Y(v),y2:Y(v),stroke:'var(--line)','stroke-width':1})); const t=sv('text',{x:L-8,y:Y(v)+4,'text-anchor':'end'}); t.textContent=fmt(v); s.appendChild(t);});
+  ticks(x0,x1,6).forEach(v=>{const t=sv('text',{x:X(v),y:H-B+16,'text-anchor':'middle'}); t.textContent=fmt(v); s.appendChild(t);});
+  const xl=sv('text',{x:(L+W-R)/2,y:H-4,'text-anchor':'middle'}); xl.textContent=c.x||''; s.appendChild(xl);
+  const yl=sv('text',{x:L,y:T-2,'text-anchor':'start'}); yl.textContent=c.y||''; s.appendChild(yl);
+  const path=p=>p.map((q,i)=>(i?'L':'M')+X(q[0]).toFixed(1)+' '+Y(q[1]).toFixed(1)).join(' ');
+  if(fit.length){ s.appendChild(sv('path',{d:path(fit),fill:'none',stroke:'var(--muted)','stroke-width':2,'stroke-dasharray':'2 4','stroke-linecap':'round'}));
+    const e=fit[fit.length-1], t=sv('text',{x:X(e[0])+8,y:Y(e[1])+4}); t.textContent=c.fit_label||'fit'; s.appendChild(t); }
+  if(c.target!=null){ s.appendChild(sv('line',{x1:L,x2:W-R,y1:Y(c.target),y2:Y(c.target),stroke:'var(--ink)','stroke-width':2,'stroke-dasharray':'6 4'}));
+    const t=sv('text',{x:W-R+8,y:Y(c.target)+4}); t.textContent=c.target_label||'target'; t.setAttribute('fill','var(--ink)'); t.style.fill='var(--ink)'; s.appendChild(t); }
+  if(pts.length>1) s.appendChild(sv('path',{d:path(pts),fill:'none',stroke:'var(--accent)','stroke-width':2,'stroke-linejoin':'round'}));
+  const tip=el('div','tip'); tip.hidden=true;
+  pts.forEach(p=>{const dot=sv('circle',{cx:X(p[0]),cy:Y(p[1]),r:5,fill:'var(--accent)',stroke:'var(--surface)','stroke-width':2}); s.appendChild(dot);
+    const hit=sv('circle',{cx:X(p[0]),cy:Y(p[1]),r:16,fill:'transparent',tabindex:0}); const label=fmt(p[0])+' → '+fmt(p[1]); hit.setAttribute('aria-label',label);
+    const show=()=>{const r=s.getBoundingClientRect(), o=box.getBoundingClientRect(); tip.textContent=label; tip.style.left=(r.left-o.left+X(p[0])/W*r.width)+'px'; tip.style.top=(r.top-o.top+Y(p[1])/H*r.height)+'px'; tip.hidden=false;};
+    hit.addEventListener('mouseenter',show); hit.addEventListener('focus',show); hit.addEventListener('mouseleave',()=>tip.hidden=true); hit.addEventListener('blur',()=>tip.hidden=true); s.appendChild(hit);});
+  const plot=el('div','plot'); plot.appendChild(s); box.appendChild(plot); box.appendChild(tip);
+  if(c.note) box.appendChild(el('p','note',c.note));
+  const dt=el('details'); dt.appendChild(el('summary',null,'Data')); const t=el('table'); const hr=el('tr'); [c.x||'x',c.y||'y'].forEach(x=>hr.appendChild(el('th',null,x))); t.appendChild(hr);
+  pts.forEach(p=>{const tr=el('tr'); tr.appendChild(el('td','n',fmt(p[0]))); tr.appendChild(el('td','n',fmt(p[1]))); t.appendChild(tr);}); dt.appendChild(t); box.appendChild(dt);
+  return box;
+}
+if((D.curves||[]).length){ $('#curves-sec').hidden=false; D.curves.forEach(c=>$('#curves').appendChild(curve(c))); }
+})();
+</script>

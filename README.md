@@ -29,7 +29,12 @@ each) and approve, change or drop each part before it goes on. Work in progress
 lives in `drafts/<slug>/` (gitignored). The skill has the starter page, the format
 reference and a check
 (`python3 .claude/skills/design-page/scripts/check_page.py pages/NAME.html`).
-The `design-review` skill reviews a finished page. Then add the page's dated card
+The `design-review` skill reviews a finished page. The `design-bench` skill
+(`.claude/skills/design-bench/`) builds a prototype of a page in `bench/<slug>/`,
+load-tests it on this machine with resource limits, injected delays and failures,
+and reports a verdict for each of the page's numbers. It also runs in Codex:
+`.agents/skills/design-bench/` is a thin wrapper that points at the same files and
+says how the board and the report work without Claude's artifacts. Then add the page's dated card
 to `pages/index.html`.
 
 Do not copy shared styles, scripts or analytics into page sources. To change the

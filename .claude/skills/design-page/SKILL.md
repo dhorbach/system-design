@@ -87,6 +87,10 @@ Two kinds of item:
 Item ids are `<stage>-Q<n>` and `<stage>-S<n>` and never change. Earlier stages stay
 on the board, folded.
 
+The board template is shared with the `design-bench` skill, which passes its own
+stage list and label in the data (`"order"`, `design.board`, and a stage's
+`preview_label` and `report_label`). Leave those out here: the six stages are the default.
+
 Decisions live in the artifact's `db`, collection `decisions`, one document per item
 id: `choice` (`A`, `B`, `C`, `other` for a question; `approve`, `change`, `drop` for a
 section), `note`, `rev`, `stage`, `by`, `at`; after you take it into the design,

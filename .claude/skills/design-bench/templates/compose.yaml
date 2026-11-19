@@ -1,0 +1,88 @@
+# Bench skeleton. Copy to bench/<slug>/compose.yaml.
+# The parts marked KEEP are the bench itself; the parts marked TODO are the prototype.
+#
+# Rules this file encodes (reference/bench.md explains each):
+# - every measured service has a CPU limit, a memory limit with swap off, and a CPU set;
+# - the load generator and the stand-ins never share CPUs with what is measured;
+# - every hop that crosses a machine in the design goes through the proxy, so a
+#   delay or a cut can be put on it;
+# - state lives on named volumes (a real filesystem), never in the container layer or tmpfs.
+name: bench-${SLUG:?set SLUG in bench.env}
+
+services:
+  # KEEP. One proxy per hop that would cross the network in the design. Delays,
+  # cuts and resets are added at run time through its API on port 8474.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.13.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes: ["./toxiproxy.json:/config/toxiproxy.json:ro"]
+    cpuset: ${CPUS_AUX}
+    ports: ["127.0.0.1:${TOXI_PORT:-8474}:8474"]
+
+  # KEEP. Stands in for every outside dependency and keeps the ledger of arrivals.
+  sink:
+    build: ./sink
+    cpuset: ${CPUS_AUX}
+    ports: ["127.0.0.1:${SINK_PORT:-8090}:8080"]
+
+  # KEEP. Open-loop load generator, on its own CPUs. Started by run.sh, not by `up`.
+  k6:
+    image: grafana/k6:2.4.0
+    profiles: ["load"]
+    cpuset: ${CPUS_LOAD}
+    user: "${UID_GID:-1000:1000}"
+    volumes: ["./k6:/scripts:ro", "./results:/results"]
+
+  # KEEP for calibration only: proves on this machine that a CPU limit bites.
+  burn:
+    image: alpine:3.22
+    profiles: ["calibration"]
+    command: ["sh", "-c", "while :; do :; done"]
+    cpus: 0.5
+    cpuset: ${CPUS_SUT}
+    mem_limit: 64m
+    memswap_limit: 64m
+    stop_grace_period: 0s
+
+  # TODO: one block per component of the design. Shape of a measured service:
+  #
+  # api:
+  #   build: ./api
+  #   cpus: 1.0                      # the design's per-node size, or the scaled size from plan.md
+  #   cpuset: ${CPUS_SUT}
+  #   mem_limit: 1g
+  #   memswap_limit: 1g              # equal to mem_limit: no swap
+  #   pids_limit: 2048
+  #   environment:
+  #     STORE_ADDR: toxiproxy:5432   # through the proxy, never straight to the store
+  #     CLOCK_SCALE: "${CLOCK_SCALE:-1}"
+  #   deploy: { replicas: 2 }
+  #
+  # Shape of a datastore (the design's product and major version, its durability settings on):
+  #
+  # store:
+  #   image: postgres:17
+  #   cpus: 2.0
+  #   cpuset: ${CPUS_DATA}
+  #   mem_limit: 4g                  # page cache counts against this: keep the design's data-to-memory ratio
+  #   memswap_limit: 4g
+  #   shm_size: 1g
+  #   volumes: ["store-data:/var/lib/postgresql/data"]
+  #   blkio_config:                  # can only slow the disk down; calibrate what it really gives
+  #     device_write_iops: [{ path: "${DATA_DEVICE}", rate: 3000 }]
+  #     device_read_iops:  [{ path: "${DATA_DEVICE}", rate: 3000 }]
+  #
+  # Packet-level delay, loss or reordering on one service (needs the netem kernel
+  # module; shares the service's network namespace, adds delay to what it sends):
+  #
+  # store-netem:
+  #   image: alpine:3.22
+  #   network_mode: "service:store"
+  #   cap_add: ["NET_ADMIN"]
+  #   command: ["sh", "-c", "apk add -q iproute2-tc && sleep infinity"]
+  #
+  # then: docker compose exec store-netem tc qdisc replace dev eth0 root netem delay 1ms 0.2ms distribution normal
+  # and to remove it (it does not go away with the sidecar): … tc qdisc del dev eth0 root
+
+# volumes:
+#   store-data:

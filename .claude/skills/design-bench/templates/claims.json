@@ -1,0 +1,65 @@
+{
+ "design": {"title": "TODO short title", "slug": "todo-slug", "source": "pages/todo-slug.html"},
+ "bench": {
+  "host": "TODO from preflight: CPU model, which cores measured services run on, memory, disk",
+  "scale": "TODO one sentence: what was kept at the design's value and what was reduced, e.g. 1 store node of 8 at the design's per-node rate and data size"
+ },
+ "min_runs": 3,
+
+ "calibration": [
+  {"id": "K1", "statement": "The ledger counts every key once", "scenario": "calibration",
+   "checks": [{"metric": "calib.ledger_keys", "op": "==", "target": 50}, {"metric": "calib.ledger_dups_before", "op": "==", "target": 0}]},
+  {"id": "K2", "statement": "The ledger reports a duplicate when one is sent", "scenario": "calibration",
+   "checks": [{"metric": "calib.ledger_dups_after", "op": "==", "target": 1}]},
+  {"id": "K3", "statement": "The load generator delivers the highest planned rate with no request dropped, using under 70% of its CPUs", "scenario": "calibration",
+   "checks": [{"metric": "floor.dropped_iterations.count", "op": "==", "target": 0},
+              {"metric": "calib.rate_delivered", "op": ">=", "target": 0.99},
+              {"metric": "floorres.k6.cpu_of_set_max", "op": "<=", "target": 0.7}]},
+  {"id": "K4", "statement": "The path through the bench adds little: 99% within TODO ms (a tenth of the tightest latency target)", "scenario": "calibration",
+   "checks": [{"metric": "floor.http_req_duration.p99", "op": "<=", "target": 10, "unit": "ms"}]},
+  {"id": "K5", "statement": "An injected delay is the delay asked for, within 10%", "scenario": "calibration",
+   "checks": [{"metric": "calib.delay_error", "op": "<=", "target": 0.10}]},
+  {"id": "K6", "statement": "A CPU limit bites: a busy loop limited to 0.5 CPU gets 0.5 and is throttled", "scenario": "calibration",
+   "checks": [{"metric": "burnres.burn-1.cpu_cores_avg", "op": ">=", "target": 0.475},
+              {"metric": "burnres.burn-1.cpu_cores_avg", "op": "<=", "target": 0.525},
+              {"metric": "burnres.burn-1.throttled_share", "op": ">=", "target": 0.9}]},
+  {"id": "K7", "statement": "Every configured measured replica is sampled with its expected CPU limit, memory limit and CPU set", "scenario": "calibration",
+   "checks": [{"metric": "calib.limit_problems", "op": "==", "target": 0}]},
+  {"id": "K8", "statement": "The host has room: under 60% busy while the load generator runs flat out", "scenario": "calibration",
+   "checks": [{"metric": "floorres.host.cpu_busy_max", "op": "<=", "target": 0.6}]}
+ ],
+
+ "gates": [
+  {"id": "G1", "title": "No request was dropped by the load generator", "metric": "load.dropped_iterations.count", "op": "==", "target": 0},
+  {"id": "G2", "title": "The planned load was delivered", "metric": "load.iterations.count", "op": ">=", "target": "load.offered*0.99"},
+  {"id": "G3", "title": "The host was not saturated", "metric": "res.host.cpu_busy_max", "op": "<=", "target": 0.8},
+  {"id": "G4", "title": "Nothing outside the bench was fighting for CPU", "metric": "res.host.psi_cpu", "op": "<=", "target": 0.10}
+ ],
+
+ "controls": [
+  {"id": "N1", "statement": "TODO a planted fault the check must catch, e.g. with the fencing check removed, a frozen worker's late write produces a duplicate",
+   "scenario": "control-no-guard", "guards": ["TODO-claim-id"],
+   "checks": [{"metric": "sink.duplicate_effects", "op": ">", "target": 0}]}
+ ],
+
+ "claims": [
+  {"id": "TODO-NFR2", "kind": "requirement", "anchor": "requirements",
+   "quote": "TODO the exact sentence of the page that makes the promise",
+   "statement": "TODO the promise as one testable sentence, with its number and the condition it holds under",
+   "evidence": "measured", "basis": "TODO why the bench value stands for the design value",
+   "scenario": "steady",
+   "checks": [{"metric": "sink.delay.p99_ms", "op": "<=", "target": 1000, "unit": "ms"}]},
+  {"id": "TODO-N7", "kind": "number", "anchor": "estimates",
+   "quote": "TODO", "statement": "TODO a derived number of the page, e.g. one row with its indexes takes about 1 kB",
+   "evidence": "measured", "scenario": "aged", "min_runs": 1, "no_gates": true,
+   "checks": [{"metric": "store.bytes_per_row", "op": "<=", "target": 1100, "unit": "B"}, {"metric": "store.bytes_per_row", "op": ">=", "target": 900, "unit": "B"}]},
+  {"id": "TODO-D4", "kind": "number", "anchor": "load",
+   "quote": "TODO", "statement": "TODO a cluster-level number, e.g. 8 store nodes carry 2,400 writes per second",
+   "evidence": "extrapolated", "basis": "TODO the model and its inputs, e.g. scalability fit over 1 to 6 nodes (usl.py), lower end of the leave-one-out range",
+   "scenario": "model-usl",
+   "checks": [{"metric": "usl.predicted_low", "op": ">=", "target": 2400, "unit": "/s"}]},
+  {"id": "TODO-F9", "kind": "failure", "anchor": "correctness",
+   "quote": "TODO", "statement": "TODO a failure path's end state, e.g. losing a zone loses no accepted job",
+   "evidence": "untestable", "reason": "TODO why one machine cannot show it, and what would"}
+ ]
+}

@@ -145,7 +145,9 @@ textarea{width:100%;min-height:4.5em;border:1px solid var(--line);border-radius:
 const $=s=>document.querySelector(s);
 const DATA=JSON.parse($('#board-data').textContent);
 const D=DATA.design||{}, ST=DATA.stages||[];
-const ORDER=[['scope','Scope'],['model','Model'],['design','Design'],['draft','Draft'],['depth','Depth'],['prereview','Pre-review']];
+/* Another skill may reuse the board with its own stages: "order" in the data replaces the six design stages, "design.board" the label. */
+const ORDER=DATA.order||[['scope','Scope'],['model','Model'],['design','Design'],['draft','Draft'],['depth','Depth'],['prereview','Pre-review']];
+const KIND=D.board||'Design board';
 const SEC={approve:'Approved',change:'Needs change',drop:'Drop'};
 let decisions={}, db=null, user=null, me=null, canWrite=true, dbState='connecting';
 const pending={}, cards={};
@@ -159,9 +161,9 @@ function stateOf(it){const d=decisions[it.id]; if(!d||!d.choice) return 'undecid
 function isDone(it){const s=stateOf(it); return s!=='undecided'&&s!=='stale';}
 
 /* header */
-document.title=(D.title?D.title+' board':'Design board');
-$('#dtitle').textContent=D.title||'Design board';
-$('#eyebrow').textContent='Design board'+(D.updated?' · updated '+D.updated:'');
+document.title=(D.title?D.title+' board':KIND);
+$('#dtitle').textContent=D.title||KIND;
+$('#eyebrow').textContent=KIND+(D.updated?' · updated '+D.updated:'');
 if(D.source){const s=el('span'); s.append('Page '); s.appendChild(el('code',null,D.source)); $('#src').appendChild(s);}
 
 /* tracker */
@@ -176,8 +178,8 @@ function stageBlock(s){
   h.appendChild(el('h2',null,s.title));
   if(s.lead) h.appendChild(html('p','lead',s.lead));
   const links=el('div','links');
-  if(s.preview){const a=el('a',null,'Open the draft page'); a.href=s.preview; a.target='_blank'; a.rel='noopener'; links.appendChild(a);}
-  if(s.report){const a=el('a',null,'Open the pre-review findings'); a.href=s.report; a.target='_blank'; a.rel='noopener'; links.appendChild(a);}
+  if(s.preview){const a=el('a',null,s.preview_label||'Open the draft page'); a.href=s.preview; a.target='_blank'; a.rel='noopener'; links.appendChild(a);}
+  if(s.report){const a=el('a',null,s.report_label||'Open the pre-review findings'); a.href=s.report; a.target='_blank'; a.rel='noopener'; links.appendChild(a);}
   if(links.childNodes.length) h.appendChild(links);
   const bar=el('div','bar'); bar.setAttribute('aria-hidden','true'); const fill=el('i'); bar.appendChild(fill);
   const cnt=el('div','count');
