@@ -135,7 +135,7 @@ def main():
         "cgroup_controllers": controllers,
         "netem": bool(sh("modinfo -F filename sch_netem")) or "sch_netem" in read("/proc/modules"),
         "docker": d,
-        "tools": {t: bool(shutil.which(t)) for t in ("go", "jq", "curl", "git")},
+        "tools": {t: bool(shutil.which(t)) for t in ("go", "jq", "curl", "git", "flock")},
         "load_1m": float(read("/proc/loadavg").split()[0]),
         "cpu_pressure_avg60": psi60,
     }
@@ -169,7 +169,7 @@ def main():
         notes.append(f"CPU governor is '{facts['cpu']['governor']}': expect more run-to-run spread at low load. Record it in the report.")
     if psi60 is not None and psi60 > 5:
         notes.append(f"The host is already busy (CPU pressure {psi60}% over the last minute). Results will not be clean.")
-    for t in ("jq", "curl", "git"):
+    for t in ("jq", "curl", "git", "flock"):
         if not facts["tools"][t]:
             problems.append(f"'{t}' is not installed: run.sh needs it.")
     facts["problems"], facts["notes"] = problems, notes

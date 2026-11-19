@@ -1,6 +1,6 @@
 PORT ?= 8000
 
-.PHONY: run test
+.PHONY: run test test-bench-integration
 
 # Local preview without analytics (built into _dev, never deployed).
 run:
@@ -9,3 +9,6 @@ run:
 
 test:
 	python3 -m unittest discover -s scripts -p 'test_*.py'
+
+test-bench-integration:
+	RUN_BENCH_INTEGRATION=1 python3 -m unittest discover -s scripts -p 'test_bench_gate.py'

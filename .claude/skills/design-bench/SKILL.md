@@ -36,6 +36,8 @@ Files in this skill:
 - `scripts/report.py`: fills the report page from the verdicts and your notes.
 - [Run analytics](reference/analytics.md): raw capture, monitoring CPU placement,
   matchmaking event fields, Parquet archives and the offline dashboard.
+- [Critical-path tests](reference/testing.md): per-design unit and storage
+  integration suites and their required pass record.
 - `templates/`: `plan.md`, `claims.json`, `compose.yaml`, `bench.env`,
   `toxiproxy.json`, `run.sh` (the bench's verbs and the calibration scenario),
   `k6/load.js` (open-loop load), `sink/` (the stand-in for outside dependencies, with
@@ -52,6 +54,7 @@ board" and "Running a stage", and apply here unchanged.
 | `bench/<slug>/` | `plan.md`, `claims.json`, the prototype's source, `compose.yaml`, `bench.env`, `run.sh`, seed scripts, `scale.py` | yes |
 | `bench/<slug>/results/<scenario>/<run>/` | `metrics.json`, source summaries and raw observations | yes, except `samples.jsonl` and `raw/` |
 | `bench/<slug>/analytics/`, `drafts/<slug>/bench-analytics.html` | Offline Parquet archive and dashboard | no |
+| `bench/<slug>/tests/`, `bench/<slug>/test-results/latest.json` | Test sources, coverage contract and latest pass record | yes |
 | `bench/<slug>/verdicts.json`, `notes.json` | The judged results and what you wrote about them | yes |
 | `drafts/<slug>/bench-board.html`, `bench-board.url` | The bench board and its artifact URL | no |
 | `drafts/<slug>/bench-report.html`, `bench-report.url` | The report and its artifact URL | no |
@@ -156,10 +159,15 @@ Add one block per component and store, each with its limits, each hop through th
 proxy. Write the scenarios of the plan as `scenario_<name>` functions in `run.sh`,
 following the two shapes shown there.
 
-**Calibrate, then smoke.**
+Write [critical-path tests](reference/testing.md) for the code behind each
+claim, including actual reads and writes against the selected storage engines.
+The test runner creates fresh storage in a separate Compose project.
+
+**Test, calibrate, then smoke.**
 
 ```sh
 cd bench/<slug>
+./run.sh test
 MAX_RATE=<highest planned rate> ./run.sh calibration
 python3 ../../.claude/skills/design-bench/scripts/verdict.py judge claims.json results
 ./run.sh smoke
@@ -264,7 +272,8 @@ to `results-<date>/`).
 For a bench copied from an older template, bring over the current calibration
 function and K7 metric (`calib.limit_problems`). Update G1/G2 to require load
 evidence for each timed scenario and control. Preserve the bench's custom
-scenarios and targets, then collect fresh calibration and run evidence.
+scenarios and targets. Add the `test` dispatch and pass-record check from the
+current runner, write both suites, then collect fresh calibration and run evidence.
 
 ## Rules that are easy to break
 

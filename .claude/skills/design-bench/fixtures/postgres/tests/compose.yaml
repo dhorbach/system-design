@@ -1,0 +1,26 @@
+services:
+  store:
+    extends:
+      file: compose.yaml
+      service: store
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+  integration:
+    image: postgres:17
+    entrypoint: ["bash", "/tests/integration.sh"]
+    environment:
+      PGHOST: store
+      PGUSER: bench
+      PGDATABASE: bench
+      PGPASSWORD: bench
+    depends_on:
+      store:
+        condition: service_healthy
+    volumes:
+      - ./src:/app:ro
+      - ./tests:/tests:ro
+volumes:
+  store-data:

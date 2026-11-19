@@ -3,6 +3,7 @@
 #
 #   ./run.sh calibration            # first, and again whenever the bench changes
 #   ./run.sh steady r1              # results land in results/steady/r1/metrics.json
+#   ./run.sh test                   # both suites, before calibration
 #
 # Every scenario follows the same order: reset the ledger, start the sampler,
 # mark the window, offer the load (and inject the fault), let the system drain,
@@ -15,11 +16,22 @@ SKILL="$(git rev-parse --show-toplevel)/.claude/skills/design-bench/scripts"
 PROJECT="bench-$SLUG"
 DC="docker compose --project-name $PROJECT --env-file bench.env"
 
-scenario="${1:?usage: run.sh <scenario> [run-name]}"
+scenario="${1:?usage: run.sh test | run.sh <scenario> [run-name]}"
+mkdir -p test-results
+exec 9>test-results/.lock
+if ! flock -n 9; then
+  echo "Another test or scenario is running for $SLUG." >&2
+  exit 1
+fi
+if [[ "$scenario" == "test" ]]; then
+  exec python3 "$SKILL/check_tests.py" run "$PWD" "$SLUG"
+fi
+python3 "$SKILL/check_tests.py" require "$PWD" "$SLUG"
 run="${2:-$(date +%Y%m%d-%H%M%S)}"
 OUT="results/$scenario/$run"
 mkdir -p "results/$scenario"
 mkdir "$OUT"  # Refuse to overwrite a previous run, even if it failed.
+cp test-results/latest.json "$OUT/test-receipt.json"
 python3 "$SKILL/provenance.py" "$PWD" "$SLUG" "$OUT/source.json" \
   --capture "${RAW_CAPTURE:-1}" --sampler-cpus "${CPUS_MON:-$CPUS_AUX}"
 RAW_STAGE=""

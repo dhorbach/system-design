@@ -1,0 +1,12 @@
+services:
+  store:
+    image: postgres:17
+    command: ["postgres", "-c", "synchronous_commit=on"]
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    volumes:
+      - store-data:/var/lib/postgresql/data
+volumes:
+  store-data:

@@ -51,6 +51,17 @@ Settings taken from the page (timeouts, ticks, batch sizes, pool sizes, durabili
 | Setting | Value | Where the page states it |
 |---|---|---|
 
+## Critical-path tests
+
+Record the paths and case names in `tests/contract.json`. Give each path unit
+cases for its local decisions and integration cases that exercise the real
+storage boundary. Name the test stores and how the suite checks committed state.
+
+| Code path or invariant | Unit cases | Real storage integration cases |
+|---|---|---|
+
+Run `./run.sh test` for the current sources before calibration.
+
 ## Bench
 
 | Unit | CPUs (limit, set) | Memory | Disk limit | Reached through |

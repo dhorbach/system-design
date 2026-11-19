@@ -1,0 +1,10 @@
+{
+  "stores": ["store"],
+  "critical_paths": [
+    {
+      "source": "src/enqueue.sh",
+      "unit": ["valid key and capacity", "invalid key and capacity"],
+      "integration": ["concurrent retries create one ticket", "failed reservation rolls back ticket"]
+    }
+  ]
+}

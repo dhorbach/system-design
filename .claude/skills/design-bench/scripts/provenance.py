@@ -16,11 +16,12 @@ def source_files(root, bench, page):
     tracked = set(git(root, "ls-files", "-z", "--cached", "--", *paths).split("\0"))
     untracked = set(git(root, "ls-files", "-z", "--others", "--exclude-standard", "--", *paths).split("\0"))
     files = {}
+    outputs = {"results", "test-results", "analytics", "verdicts.json", "notes.json"}
     for relative in sorted((tracked | untracked) - {""}):
         path = Path(relative)
         if path.is_relative_to(bench):
-            parts = path.relative_to(bench).parts
-            if parts[0] in {"results", "analytics", "verdicts.json"} or parts[0].startswith("results-"):
+            first = path.relative_to(bench).parts[0]
+            if first in outputs or first.startswith("results-"):
                 continue
         input_file = root / path
         digest = None

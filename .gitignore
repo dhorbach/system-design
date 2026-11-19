@@ -5,3 +5,5 @@ drafts/
 bench/*/results/**/samples.jsonl
 bench/*/results/**/raw/
 bench/*/analytics/
+bench/*/test-results/*/
+bench/*/test-results/.lock
