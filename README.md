@@ -22,8 +22,12 @@ A guide page holds its title and description, its component colours, the
 component map, its sections, its glossary, and the styles and script of demos
 that only it has. `pages/distributed-job-scheduler.html` is the example.
 
-To add a guide, use the `design-page` skill (`.claude/skills/design-page/`): it
-has the starter page, the format reference and a check
+To add a guide, use the `design-page` skill (`.claude/skills/design-page/`). It
+works in stages (scope, model, design, draft, depth, pre-review) and stops after
+each one at a design board artifact, where you answer its questions (three options
+each) and approve, change or drop each part before it goes on. Work in progress
+lives in `drafts/<slug>/` (gitignored). The skill has the starter page, the format
+reference and a check
 (`python3 .claude/skills/design-page/scripts/check_page.py pages/NAME.html`).
 The `design-review` skill reviews a finished page. Then add the page's dated card
 to `pages/index.html`.

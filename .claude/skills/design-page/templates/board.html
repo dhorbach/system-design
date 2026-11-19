@@ -1,0 +1,354 @@
+<title>Design board</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+/* Layout: stage tracker on top, the open stage's cards below, finished stages folded underneath. */
+:root{
+  --bg:#F3F5F8; --surface:#FFFFFF; --sunken:#E9EDF3; --ink:#18202E; --muted:#5B6577; --line:#D9DFE8; --accent:#2D5BD7;
+  --approved:#1E7F4F; --change:#7A45C9; --rejected:#6F7889; --stale:#A86200;
+  --head:"Space Grotesk",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+  --body:"Inter",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0F141C; --surface:#171E29; --sunken:#111821; --ink:#E5EAF2; --muted:#98A3B5; --line:#2A3443; --accent:#86A6FF;
+    --approved:#52CF90; --change:#BC98F7; --rejected:#9AA4B4; --stale:#F2B04A;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0F141C; --surface:#171E29; --sunken:#111821; --ink:#E5EAF2; --muted:#98A3B5; --line:#2A3443; --accent:#86A6FF;
+  --approved:#52CF90; --change:#BC98F7; --rejected:#9AA4B4; --stale:#F2B04A;
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:400 15px/1.55 var(--body);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:54rem;margin:0 auto;padding-block:36px 80px;display:grid;gap:22px}
+a{color:var(--accent);text-underline-offset:3px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+button,textarea{font:inherit;color:inherit}
+
+.top{display:grid;gap:6px}
+.eyebrow{font:500 .78rem var(--head);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+h1{font:700 clamp(1.7rem,4vw,2.3rem)/1.1 var(--head);letter-spacing:-.015em;margin:0;text-wrap:balance}
+.src{color:var(--muted);font-size:.9rem;display:flex;flex-wrap:wrap;gap:4px 14px}
+code{font:500 .84em var(--mono);background:var(--sunken);padding:.05em .35em;border-radius:4px;overflow-wrap:anywhere}
+
+.track{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;counter-reset:st}
+.track li{counter-increment:st;border-top:3px solid var(--line);padding-top:6px;font:500 .8rem/1.3 var(--head);color:var(--muted);min-width:0}
+.track li::before{content:counter(st) " · ";font-variant-numeric:tabular-nums}
+.track li.done{border-color:var(--approved);color:var(--ink)}
+.track li.open{border-color:var(--accent);color:var(--ink);font-weight:700}
+.track small{display:block;font:400 .74rem var(--body);color:var(--muted);margin-top:2px}
+
+.status{font-size:.86rem;color:var(--muted);margin:0}
+.status.warn{color:var(--stale)}
+
+.stage{display:grid;gap:14px}
+.stage>header{display:grid;gap:6px}
+.stage h2{font:700 1.35rem/1.2 var(--head);margin:0}
+.stage .lead{margin:0;max-width:44rem}
+.links{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:.9rem}
+.bar{display:flex;height:6px;border-radius:3px;overflow:hidden;background:var(--sunken)}
+.bar i{display:block;height:100%;background:var(--approved)}
+.count{font-size:.84rem;color:var(--muted);font-variant-numeric:tabular-nums}
+details.past{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
+details.past>summary{cursor:pointer;font:600 1rem var(--head)}
+details.past[open]>summary{margin-bottom:12px}
+
+.list{display:grid;gap:14px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:grid;gap:10px;min-width:0;scroll-margin-top:16px}
+.head{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-size:.8rem}
+.fid{font:500 .8rem var(--mono);color:var(--muted)}
+.tag{color:var(--muted);background:var(--sunken);border-radius:5px;padding:2px 7px}
+.dstate{margin-left:auto;font-weight:600;color:var(--muted)}
+.dstate.ok{color:var(--approved)} .dstate.change{color:var(--change)} .dstate.drop{color:var(--rejected)} .dstate.stale{color:var(--stale)}
+.card h3{font:600 1.08rem/1.35 var(--head);margin:0;text-wrap:balance}
+.body{min-width:0;overflow-x:auto}
+.body>:first-child{margin-top:0} .body>:last-child{margin-bottom:0}
+.body p,.body ul,.body ol{margin:.4em 0}
+.body ul,.body ol{padding-left:1.3em}
+.body table{border-collapse:collapse;font-size:.88rem;margin:.5em 0;min-width:100%}
+.body th,.body td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
+.body th{font:600 .8rem var(--head);color:var(--muted)}
+.body pre{background:var(--sunken);border-radius:8px;padding:10px 12px;overflow-x:auto;font:500 .82rem/1.5 var(--mono)}
+.body pre code{background:none;padding:0}
+
+.opts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.opt{display:grid;gap:4px;align-content:start;text-align:left;border:1px solid var(--line);background:var(--bg);border-radius:10px;padding:10px 12px;cursor:pointer;min-width:0}
+.opt:hover:not(:disabled){border-color:var(--ink)}
+.opt:disabled{cursor:default;opacity:.6}
+.opt[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--surface);opacity:1}
+.opt .k{font:600 .78rem var(--mono);color:var(--muted);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.opt .rec{font:600 .68rem var(--head);letter-spacing:.04em;text-transform:uppercase;color:var(--approved);border:1px solid currentColor;border-radius:4px;padding:0 5px}
+.opt b{font:600 .95rem/1.3 var(--head)}
+.opt span{font-size:.86rem;color:var(--muted)}
+.opt .cost{font-size:.82rem;color:var(--muted);border-top:1px dashed var(--line);padding-top:4px}
+
+.decide{display:grid;gap:8px;border-top:1px solid var(--line);padding-top:10px}
+.btns{display:flex;flex-wrap:wrap;gap:6px}
+.btns button{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:5px 12px;cursor:pointer;font-weight:500}
+.btns button:hover:not(:disabled){border-color:var(--ink)}
+.btns button:disabled{opacity:.45;cursor:default}
+.btns button[aria-pressed="true"].approve{background:var(--approved);border-color:var(--approved);color:var(--surface)}
+.btns button[aria-pressed="true"].change{background:var(--change);border-color:var(--change);color:var(--surface)}
+.btns button[aria-pressed="true"].drop{background:var(--rejected);border-color:var(--rejected);color:var(--surface)}
+.btns .link{border:0;background:none;color:var(--muted);text-decoration:underline;text-underline-offset:3px;padding-inline:4px}
+textarea{width:100%;min-height:4.5em;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:8px 10px;resize:vertical}
+.note{white-space:pre-wrap;font-size:.92rem;border-left:2px solid var(--change);padding-left:10px}
+.meta{font-size:.8rem;color:var(--muted)}
+.meta.err{color:var(--stale)}
+.foot{font-size:.82rem;color:var(--muted)}
+
+@media (max-width:640px){
+  .track{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:12px}
+  .opts{grid-template-columns:1fr}
+  .dstate{margin-left:0;flex-basis:100%}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow" id="eyebrow">Design board</div>
+    <h1 id="dtitle">Design board</h1>
+    <div class="src" id="src"></div>
+  </header>
+  <ol class="track" id="track" aria-label="Stages"></ol>
+  <p class="status" id="status">Loading decisions…</p>
+  <main id="current"></main>
+  <section id="past" class="list" aria-label="Finished stages"></section>
+  <p class="foot">Pick an option on every question and approve, change or drop every section. Claude reads the decisions and the comments before it starts the next stage.</p>
+</div>
+
+<script type="application/json" id="board-data">
+{"design":{"title":"Example design","slug":"example","source":"pages/example.html","updated":"2026-11-19"},
+ "stage":"scope",
+ "stages":[
+  {"key":"scope","title":"Scope","lead":"Example stage. What the page covers and the scale it is sized for.","preview":"","report":"",
+   "items":[
+    {"id":"scope-Q1","kind":"question","rev":1,"title":"Which scale should the page be sized for?","context":"<p>The scale picks the driving number and with it the storage design.</p>",
+     "options":[
+      {"key":"A","label":"Mid-size product","detail":"10k writes/s at peak, one region.","cost":"Simplest design; sharding stays a footnote.","recommended":true},
+      {"key":"B","label":"Large consumer app","detail":"100k writes/s, three regions.","cost":"Adds a partitioning section and cross-region failure paths."},
+      {"key":"C","label":"Internal tool","detail":"100 writes/s, one database.","cost":"Little to design; the page gets short."}]},
+    {"id":"scope-S1","kind":"section","rev":1,"title":"Out of scope","body":"<ul><li>Analytics on clicks</li><li>Custom domains</li></ul>"}
+   ]}
+ ]}
+</script>
+
+<script>
+(function(){
+const $=s=>document.querySelector(s);
+const DATA=JSON.parse($('#board-data').textContent);
+const D=DATA.design||{}, ST=DATA.stages||[];
+const ORDER=[['scope','Scope'],['model','Model'],['design','Design'],['draft','Draft'],['depth','Depth'],['prereview','Pre-review']];
+const SEC={approve:'Approved',change:'Needs change',drop:'Drop'};
+let decisions={}, db=null, user=null, me=null, canWrite=true, dbState='connecting';
+const pending={}, cards={};
+const items=[]; ST.forEach(s=>(s.items||[]).forEach(it=>items.push(Object.assign({stage:s.key},it))));
+
+function el(tag,cls,text){const e=document.createElement(tag); if(cls) e.className=cls; if(text!=null) e.textContent=text; return e;}
+function html(tag,cls,markup){const e=el(tag,cls); e.innerHTML=markup||''; return e;}  /* markup is written by Claude into the board data, never by viewers */
+function rev(it){return it.rev||1;}
+/* state of one item: undecided, stale (decided on an older revision), or the choice */
+function stateOf(it){const d=decisions[it.id]; if(!d||!d.choice) return 'undecided'; if((d.rev||1)<rev(it)) return 'stale'; return d.choice;}
+function isDone(it){const s=stateOf(it); return s!=='undecided'&&s!=='stale';}
+
+/* header */
+document.title=(D.title?D.title+' board':'Design board');
+$('#dtitle').textContent=D.title||'Design board';
+$('#eyebrow').textContent='Design board'+(D.updated?' · updated '+D.updated:'');
+if(D.source){const s=el('span'); s.append('Page '); s.appendChild(el('code',null,D.source)); $('#src').appendChild(s);}
+
+/* tracker */
+const curIdx=ORDER.findIndex(o=>o[0]===DATA.stage);
+const trackLis={};
+ORDER.forEach(([k,t],i)=>{const li=el('li',i<curIdx?'done':(i===curIdx?'open':''),t); li.appendChild(el('small')); if(i===curIdx) li.setAttribute('aria-current','step'); trackLis[k]=li; $('#track').appendChild(li);});
+
+/* stages */
+function stageBlock(s){
+  const sec=el('section','stage'); sec.id='stage-'+s.key;
+  const h=el('header');
+  h.appendChild(el('h2',null,s.title));
+  if(s.lead) h.appendChild(html('p','lead',s.lead));
+  const links=el('div','links');
+  if(s.preview){const a=el('a',null,'Open the draft page'); a.href=s.preview; a.target='_blank'; a.rel='noopener'; links.appendChild(a);}
+  if(s.report){const a=el('a',null,'Open the pre-review findings'); a.href=s.report; a.target='_blank'; a.rel='noopener'; links.appendChild(a);}
+  if(links.childNodes.length) h.appendChild(links);
+  const bar=el('div','bar'); bar.setAttribute('aria-hidden','true'); const fill=el('i'); bar.appendChild(fill);
+  const cnt=el('div','count');
+  h.append(bar,cnt);
+  sec.appendChild(h);
+  const list=el('div','list');
+  (s.items||[]).forEach(it=>list.appendChild(card(Object.assign({stage:s.key},it))));
+  if(!(s.items||[]).length) list.appendChild(el('p','count','Nothing to decide in this stage.'));
+  sec.appendChild(list);
+  s._fill=fill; s._cnt=cnt;
+  return sec;
+}
+ST.forEach(s=>{
+  const b=stageBlock(s);
+  if(s.key===DATA.stage) $('#current').appendChild(b);
+  else{ const d=el('details','past'); const sm=el('summary',null,s.title); d.append(sm,b); b.querySelector('h2').hidden=true; $('#past').appendChild(d); s._summary=sm; }
+});
+
+/* cards */
+function card(it){
+  const c=el('article','card'); c.id=it.id; c.setAttribute('aria-labelledby',it.id+'-t');
+  const h=el('div','head');
+  h.appendChild(el('span','fid',it.id));
+  h.appendChild(el('span','tag',it.kind==='question'?'Question':'Section'));
+  if(rev(it)>1) h.appendChild(el('span','tag','Revision '+rev(it)));
+  const ds=el('span','dstate'); h.appendChild(ds);
+  const t=el('h3',null,it.title); t.id=it.id+'-t';
+  c.append(h,t);
+  if(it.context) c.appendChild(html('div','body',it.context));
+  if(it.body) c.appendChild(html('div','body',it.body));
+  if(it.revised_note){const r=el('div','meta'); r.textContent='What changed in this revision: '+it.revised_note; c.appendChild(r);}
+  const k={c,ds,it,opts:{},btn:{}};
+  const dz=el('div','decide');
+  if(it.kind==='question'){
+    const og=el('div','opts'); og.setAttribute('role','group'); og.setAttribute('aria-label','Options for '+it.id);
+    (it.options||[]).forEach(o=>{
+      const b=el('button','opt'); b.type='button';
+      const kk=el('span','k',o.key); if(o.recommended) kk.appendChild(el('span','rec','Recommended'));
+      b.append(kk,el('b',null,o.label));
+      if(o.detail) b.appendChild(el('span',null,o.detail));
+      if(o.cost) b.appendChild(el('span','cost',o.cost));
+      b.addEventListener('click',()=>decide(it,o.key,keepNote(it)));
+      og.appendChild(b); k.opts[o.key]=b;
+    });
+    c.appendChild(og);
+    const btns=el('div','btns');
+    k.btn.other=el('button','change','Something else…');
+    k.btn.addnote=el('button','link','Add a note');
+    k.btn.clear=el('button','link','Clear');
+    btns.append(k.btn.other,k.btn.addnote,k.btn.clear);
+    dz.appendChild(btns);
+  }else{
+    const btns=el('div','btns');
+    k.btn.approve=el('button','approve','Approve');
+    k.btn.change=el('button','change','Needs change');
+    k.btn.drop=el('button','drop','Drop');
+    k.btn.clear=el('button','link','Clear');
+    btns.append(k.btn.approve,k.btn.change,k.btn.drop,k.btn.clear);
+    dz.appendChild(btns);
+    k.btn.approve.addEventListener('click',()=>decide(it,'approve',''));
+    k.btn.drop.addEventListener('click',()=>decide(it,'drop',''));
+  }
+  Object.values(k.btn).forEach(b=>b.type='button');
+  k.ta=el('textarea'); k.ta.hidden=true; k.ta.setAttribute('aria-label','Note for '+it.id);
+  k.save=el('button','change','Save note'); k.save.type='button'; k.save.hidden=true;
+  const sv=el('div','btns'); sv.appendChild(k.save);
+  k.note=el('div','note'); k.note.hidden=true;
+  k.meta=el('div','meta'); k.meta.hidden=true;
+  k.err=el('div','meta err'); k.err.hidden=true; k.err.setAttribute('role','status');
+  dz.append(k.note,k.ta,sv,k.meta,k.err);
+  c.appendChild(dz);
+  /* note entry: "other" / "change" need a note; "add a note" keeps the current choice */
+  let noteFor=null;
+  function openNote(choice,ph){ noteFor=choice; const d=decisions[it.id]; k.ta.placeholder=ph; if(!k.ta.value&&d) k.ta.value=d.note||''; k.ta.hidden=false; k.save.hidden=false; k.ta.focus(); }
+  if(k.btn.other) k.btn.other.addEventListener('click',()=>openNote('other','Describe the option you want instead.'));
+  if(k.btn.addnote) k.btn.addnote.addEventListener('click',()=>{ const s=stateOf(it); if(s==='undecided'||s==='stale'){showErr(it.id,'Pick an option first, then add a note to it.'); return;} openNote(decisions[it.id].choice,'Anything to add to this choice?'); });
+  if(k.btn.change) k.btn.change.addEventListener('click',()=>openNote('change','What should change? Claude revises the section from this note.'));
+  k.save.addEventListener('click',()=>{ const v=k.ta.value.trim(); if(!v&&(noteFor==='other'||noteFor==='change')){showErr(it.id,'Add a note saying what you want.'); k.ta.focus(); return;} decide(it,noteFor,v); });
+  k.btn.clear.addEventListener('click',()=>clearDecision(it));
+  cards[it.id]=k;
+  return c;
+}
+function keepNote(it){const d=decisions[it.id]; return (d&&(d.rev||1)===rev(it)&&d.choice!=='other')?(d.note||''):'';}
+function showErr(id,msg){const k=cards[id]; k.err.textContent=msg; k.err.hidden=!msg;}
+
+async function decide(it,choice,note){
+  if(!db||!canWrite||pending[it.id]) return;
+  pending[it.id]=true; showErr(it.id,''); updateCard(it.id);
+  try{
+    await db.doc('decisions/'+it.id).set({choice,note:note||'',rev:rev(it),stage:it.stage,by:me||null,at:new Date().toISOString()});
+    const k=cards[it.id]; k.ta.hidden=true; k.save.hidden=true; k.ta.value='';
+  }catch(e){ failed(it.id,e); }
+  pending[it.id]=false; renderAll();
+}
+async function clearDecision(it){
+  if(!db||!canWrite||pending[it.id]) return;
+  pending[it.id]=true; showErr(it.id,''); updateCard(it.id);
+  try{ await db.doc('decisions/'+it.id).delete(); }catch(e){ failed(it.id,e); }
+  pending[it.id]=false; renderAll();
+}
+function failed(id,e){
+  const c=e&&e.code;
+  if(c==='invalid_argument'||c==='not_granted'||c==='revoked'){ canWrite=false; renderAll(); showErr(id,'You can read this board, but your access does not allow recording decisions.'); }
+  else if(c==='quota_exceeded') showErr(id,'The board is out of storage, so this decision was not saved.');
+  else showErr(id,'This decision was not saved. Check your connection and try again.');
+}
+
+function label(it,choice){
+  if(it.kind==='question'){ if(choice==='other') return 'Something else'; const o=(it.options||[]).find(o=>o.key===choice); return o?choice+' · '+o.label:choice; }
+  return SEC[choice]||choice;
+}
+async function updateCard(id){
+  const k=cards[id], it=k.it, d=decisions[id], st=stateOf(it);
+  const live=!!db&&canWrite&&!pending[id];
+  const cur=(st!=='undecided'&&st!=='stale')?st:null;
+  if(st==='undecided'){k.ds.className='dstate'; k.ds.textContent='Undecided';}
+  else if(st==='stale'){k.ds.className='dstate stale'; k.ds.textContent='Revised · decide again';}
+  else{k.ds.className='dstate '+(st==='change'||st==='other'?'change':(st==='drop'?'drop':'ok')); k.ds.textContent=label(it,st);}
+  Object.entries(k.opts).forEach(([key,b])=>{b.disabled=!live; b.setAttribute('aria-pressed',String(cur===key));});
+  ['approve','change','drop','other'].forEach(n=>{ if(k.btn[n]){k.btn[n].disabled=!live; k.btn[n].setAttribute('aria-pressed',String(cur===n));} });
+  if(k.btn.addnote){k.btn.addnote.disabled=!live; k.btn.addnote.hidden=!cur||cur==='other';}
+  k.save.disabled=!live;
+  k.btn.clear.hidden=!d; k.btn.clear.disabled=!live;
+  k.note.hidden=!(d&&d.note); if(d&&d.note) k.note.textContent=(st==='stale'?'Earlier note: ':'')+d.note;
+  if(!d){ k.meta.hidden=true; return; }
+  let who='';
+  if(d.by&&user){ try{ const ps=await user.profiles([d.by]); who=(ps[d.by]&&ps[d.by].isMe)?'you':((ps[d.by]&&ps[d.by].name)||''); }catch(e){} }
+  const when=d.at?new Date(d.at).toLocaleString([], {dateStyle:'medium',timeStyle:'short'}):'';
+  let line=(st==='stale'?'Earlier: ':'')+label(it,d.choice); if(who) line+=' by '+who; if(when) line+=' · '+when;
+  if(d.applied&&st!=='stale') line+='. Taken into the design'+(d.applied_note?': '+d.applied_note:'.');
+  k.meta.textContent=line; k.meta.hidden=false;
+}
+
+function renderAll(){
+  ST.forEach(s=>{
+    const its=items.filter(i=>i.stage===s.key), done=its.filter(isDone).length;
+    if(s._fill) s._fill.style.width=(its.length?done/its.length*100:100)+'%';
+    if(s._cnt) s._cnt.textContent=its.length?done+' of '+its.length+' decided':'';
+    if(s._summary) s._summary.textContent=s.title+' · '+done+' of '+its.length+' decided';
+    const li=trackLis[s.key]; if(li) li.querySelector('small').textContent=its.length?done+'/'+its.length:'';
+  });
+  items.forEach(it=>updateCard(it.id));
+  renderStatus();
+}
+function renderStatus(){
+  const s=$('#status'); s.classList.remove('warn');
+  const open=items.filter(i=>i.stage===DATA.stage), left=open.filter(i=>!isDone(i)).length;
+  const msg={
+    connecting:'Loading decisions…',
+    live:!canWrite?'You can read this board. People with edit access record the decisions.':(left?left+' left to decide in this stage. Decisions are saved for everyone who can open the board.':'Every item in this stage is decided. Tell Claude to continue.'),
+    slow:'Decisions can’t be reached yet, so what you see may be out of date.',
+    absent:'Decisions can’t be recorded here. Open the board on claude.ai to decide.',
+    error:'Decisions stopped updating. Reload the page to reconnect.'
+  }[dbState];
+  if(dbState==='slow'||dbState==='error') s.classList.add('warn');
+  s.textContent=msg;
+}
+
+renderAll();
+
+(async function(){
+  if(!(window.claude&&window.claude.use)){ dbState='absent'; renderAll(); return; }
+  [db,user]=await Promise.all([window.claude.use('db'),window.claude.use('user')]);
+  if(!db){ dbState='absent'; renderAll(); return; }
+  if(user){ me=await user.id(); const w=await user.can('data.write'); if(w===false) canWrite=false; }
+  const timer=setTimeout(()=>{ if(dbState==='connecting'){ dbState='slow'; renderStatus(); } },10000);
+  db.collection('decisions').onSnapshot(snap=>{
+    const next={}; snap.docs.forEach(d=>{ if(d.exists) next[d.id]=d.data(); }); decisions=next;
+    clearTimeout(timer); dbState='live';
+    renderAll();
+  },e=>{ clearTimeout(timer); dbState=(e&&e.code==='revoked')?'absent':'error'; renderAll(); });
+})();
+})();
+</script>
